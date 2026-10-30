@@ -320,6 +320,27 @@ Test read-only behavior first:
 ./shieldctl schedule list
 ```
 
+### Container test harness
+
+The repository includes a safe container harness for CLI, syntax, ShellCheck,
+dry-run, isolated hardening-file, rollback, and distro-package checks:
+
+```bash
+docker compose run --rm debian
+docker compose run --rm fedora
+```
+
+The services use a read-only project mount, a read-only container filesystem,
+temporary `/tmp` and `/run`, dropped Linux capabilities, and
+`no-new-privileges`. They never mount the host `/etc`, `/var`, Docker socket,
+host PID namespace, or host network.
+
+Containers intentionally do **not** validate real host kernel changes, firewall
+behavior, systemd activation, AppArmor/SELinux, USBGuard, disk encryption,
+boot behavior, or physical/network recovery. Validate those in disposable VMs
+with snapshots. Never add `privileged: true`, `network_mode: host`, `pid: host`,
+or host `/etc` and `/var` mounts to this test harness.
+
 ## Contributing
 
 Keep changes focused and conservative. Preserve the dry-run path, avoid destructive
