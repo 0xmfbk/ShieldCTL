@@ -113,6 +113,12 @@ pkg_name() {
     dnf:clamav) echo "clamav clamav-update" ;;
     apt-get:auditd) echo "auditd" ;;
     dnf:auditd | zypper:auditd | pacman:auditd) echo "audit" ;;
+    apt-get:auto-updates) echo "unattended-upgrades" ;;
+    dnf:auto-updates) echo "dnf-automatic" ;;
+    apt-get:firewall) echo "ufw" ;;
+    dnf:firewall) echo "firewalld" ;;
+    pacman:firewall) echo "ufw" ;;
+    zypper:firewall) echo "firewalld" ;;
     *) echo "$1" ;;
   esac
 }
@@ -430,10 +436,13 @@ cmd_install() {
   init_state
   detect_pm || die "no supported package manager (apt/dnf/pacman/zypper)"
   local want=(lynis rkhunter clamav aide fail2ban auditd) a
+  case "$PM" in
+    apt-get | dnf) want+=(auto-updates) ;;
+  esac
   for a in "$@"; do
     case "$a" in
       --usbguard) want+=(usbguard) ;;
-      --firewall) want+=(ufw) ;;
+      --firewall) want+=(firewall) ;;
       *) die "unknown option $a" ;;
     esac
   done
@@ -455,6 +464,12 @@ cmd_install() {
   fi
   have auditctl && run systemctl enable --now auditd >/dev/null 2>&1 || true
   have fail2ban-client && run systemctl enable --now fail2ban >/dev/null 2>&1 || true
+  if [ "$DRY_RUN" -eq 0 ] && have systemctl; then
+    case "$PM" in
+      apt-get) run systemctl enable --now apt-daily-upgrade.timer >/dev/null 2>&1 || true ;;
+      dnf) run systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 || true ;;
+    esac
+  fi
   [ ${#failed[@]} -eq 0 ] && ok "all tools installed" || warn "not installed: ${failed[*]} (may need extra repos such as EPEL)"
 }
 
@@ -725,8 +740,11 @@ cmd_status() {
   printf '%s%s %s%s - %s\n\n' "$C_B" "$PROG" "$VERSION" "$C_N" "$(os_name) / kernel $(uname -r)"
   [ "$(id -u)" -eq 0 ] || warn "not root: some checks are limited (run: sudo $PROG status)"
   printf '%sProtection layers%s\n' "$C_B" "$C_N"
-  if lsblk -rno TYPE 2>/dev/null | grep -qx crypt; then chk ok "Disk encryption" "LUKS/dm-crypt volume present"
-  else chk warn "Disk encryption" "none detected (protects against laptop theft)"; fi
+  if lsblk -rno TYPE 2>/dev/null | grep -qx crypt; then
+    chk info "Disk encryption" "LUKS/dm-crypt volume present"
+  else
+    chk info "Disk encryption" "not detected (enable during OS installation or with a distro-specific migration tool)"
+  fi
   if have mokutil; then
     mokutil --sb-state 2>/dev/null | grep -qi enabled && chk ok "Secure Boot" "enabled" || chk info "Secure Boot" "disabled (optional)"
   fi
@@ -739,7 +757,16 @@ cmd_status() {
   svc_chk "auditd" auditd
   svc_chk "USBGuard" usbguard
   svc_chk "ClamAV signatures" clamav-freshclam
-  svc_chk "Auto updates" unattended-upgrades
+  if systemctl is-active --quiet apt-daily-upgrade.timer 2>/dev/null ||
+    systemctl is-active --quiet dnf-automatic.timer 2>/dev/null ||
+    systemctl is-active --quiet packagekit.service 2>/dev/null; then
+    chk ok "Auto updates" "scheduled"
+  elif systemctl cat unattended-upgrades.service >/dev/null 2>&1 ||
+    systemctl cat dnf-automatic.timer >/dev/null 2>&1; then
+    chk warn "Auto updates" "installed but not scheduled"
+  else
+    chk info "Auto updates" "not installed"
+  fi
   if have aide; then
     aide_setup 2>/dev/null
     [ -f "$DB_IN" ] && chk ok "AIDE baseline" "present" || chk warn "AIDE baseline" "missing (sudo $PROG aide init)"
