@@ -65,7 +65,7 @@ packages or documentation.
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-plugin
+sudo apt-get install -y docker.io docker-compose
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 ```
@@ -111,10 +111,13 @@ docker compose version
 docker run --rm hello-world
 ```
 
-If your distribution does not provide `docker compose` as a plugin, use the
-distribution-supported Compose package or Docker's official installation
-documentation. Do not run the test harness with `sudo` unless your Docker
-installation specifically requires it.
+If `docker compose version` is unavailable but `docker-compose --version`
+works, use `docker-compose` in the commands below. Debian 13 commonly provides
+the standalone `docker-compose` command from its default repositories.
+Alternatively, install Docker's official Compose plugin.
+
+Do not run the test harness with `sudo` unless your Docker installation
+specifically requires it.
 
 ## Installation
 
@@ -401,6 +404,14 @@ dry-run, isolated hardening-file, rollback, and distro-package checks:
 docker compose build
 docker compose run --rm debian
 docker compose run --rm fedora
+```
+
+With standalone Compose:
+
+```bash
+docker-compose build
+docker-compose run --rm debian
+docker-compose run --rm fedora
 ```
 
 The services use a read-only project mount, a read-only container filesystem,
