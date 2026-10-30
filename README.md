@@ -21,7 +21,7 @@ without installing a permanent shieldctl daemon or sending data to an external s
 - Conservative kernel-module blocking
 - Core-dump restrictions
 - Safer permissions for selected security-sensitive paths
-- Optional firewall, DNS-over-TLS, USBGuard, umask, and service hardening
+- Optional firewall, USBGuard, umask, and service hardening
 - Lynis, rkhunter, ClamAV, AIDE, update, and network-listener checks
 - AIDE baseline hashing to detect baseline tampering
 - Reversible drop-in files, backups, manifests, and rollback support
@@ -110,7 +110,6 @@ sudo shieldctl harden
 sudo shieldctl harden --dry-run
 sudo shieldctl harden sysctl modules coredump perms firewall
 sudo shieldctl harden umask
-sudo shieldctl harden dns
 sudo shieldctl harden usbguard
 sudo shieldctl harden all
 ```
@@ -130,10 +129,9 @@ Opt-in modules:
 | Module | Purpose |
 |---|---|
 | `umask` | Sets the login default umask to `027` |
-| `dns` | Attempts DNS-over-TLS and reverts if resolution breaks |
 | `usbguard` | Generates a USB policy and refuses unsafe replacement by default |
 
-The `all` shortcut includes `umask` and `dns`, but does not enable USBGuard
+The `all` shortcut includes `umask`, but does not enable USBGuard
 automatically because USB policy mistakes can affect keyboards and other devices.
 
 ### Rollback
@@ -245,7 +243,6 @@ until `sudo shieldctl rollback` is run.
 | `-n`, `--dry-run` | Preview changes without writing or applying them |
 | `-y`, `--yes` | Answer safety confirmations positively |
 | `-q`, `--quiet` | Suppress normal output; useful for timers |
-| `--strict` | Try mandatory DNS-over-TLS before opportunistic mode |
 | `--path DIR` | Add a malware-scan path; repeatable |
 | `--bg` | Run an AIDE operation through systemd |
 | `--no-accept` | Keep an AIDE update as a reviewable new database |
@@ -281,7 +278,6 @@ sudo -E ./shieldctl harden --dry-run
 - `ip_forward`, `kernel.modules_disabled`, and `usb-storage` are deliberately
   untouched because they can break virtualization, containers, drivers, or input.
 - Permissions are only tightened by the permission module.
-- DNS changes are verified and reverted if resolution fails.
 - USBGuard refuses to overwrite an existing policy unless explicitly authorized.
 - Scheduled commands are allowlisted instead of accepting arbitrary shell code.
 - Non-success scan results return non-zero and are recorded for systemd visibility.

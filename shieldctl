@@ -6,7 +6,7 @@
 #   * every change is reversible (drop-in files + backups + rollback)
 #   * --dry-run shows what would happen without touching anything
 #   * kernel keys are tested before being persisted (no "Invalid argument" noise)
-#   * risky actions (DNS, USBGuard, services) are opt-in and self-verifying
+#   * risky actions (USBGuard, services) are opt-in and self-verifying
 set -uo pipefail
 
 readonly VERSION="1.0.0"
@@ -21,7 +21,6 @@ LIVE=0
 DRY_RUN=0
 ASSUME_YES=0
 QUIET=0
-STRICT=0
 BG=0
 NO_ACCEPT=0
 SCAN_PATHS=()
@@ -306,33 +305,6 @@ h_firewall() {
   fi
 }
 
-h_dns() {
-  info "DNS over TLS (self-verifying)"
-  [ "$LIVE" -eq 1 ] || { info "(skipped in test mode)"; return 0; }
-  systemctl is-active --quiet systemd-resolved || { warn "systemd-resolved not active; skipping"; return 0; }
-  if ! getent hosts example.com >/dev/null 2>&1; then
-    warn "DNS is not working right now, so I cannot verify a change. Skipping."
-    return 0
-  fi
-  [ "$DRY_RUN" -eq 1 ] && { info "would configure DoT and verify resolution"; return 0; }
-  local modes=(opportunistic) mode f="$ETC/systemd/resolved.conf.d/shieldctl-dot.conf"
-  [ "$STRICT" -eq 1 ] && modes=(yes opportunistic)
-  for mode in "${modes[@]}"; do
-    printf '[Resolve]\nDNS=9.9.9.9#dns.quad9.net 1.1.1.1#cloudflare-dns.com\nDNSOverTLS=%s\nDNSSEC=allow-downgrade\n' "$mode" |
-      write_managed "$f"
-    systemctl restart systemd-resolved
-    sleep 3
-    if getent hosts example.com >/dev/null 2>&1; then
-      ok "DNS over TLS active (mode: $mode)"
-      return 0
-    fi
-    warn "DNS broke with mode '$mode' (network may block port 853); trying a safer mode"
-  done
-  rm -f "$f"
-  systemctl restart systemd-resolved
-  warn "DoT not usable on this network. Reverted to your original DNS settings."
-}
-
 h_usbguard() {
   info "USBGuard (refuses to lock you out)"
   [ "$LIVE" -eq 1 ] || { info "(skipped in test mode)"; return 0; }
@@ -362,9 +334,9 @@ cmd_harden() {
   local mods=("$@") m
   [ ${#mods[@]} -eq 0 ] && mods=(sysctl modules coredump perms firewall)
   [ "${mods[0]}" = recommended ] && mods=(sysctl modules coredump perms firewall)
-  [ "${mods[0]}" = all ] && mods=(sysctl modules coredump perms firewall umask dns)
+  [ "${mods[0]}" = all ] && mods=(sysctl modules coredump perms firewall umask)
   for m in "${mods[@]}"; do
-    case "$m" in sysctl | modules | coredump | perms | firewall | umask | dns | usbguard) ;; *) die "unknown module '$m'. Modules: sysctl modules coredump perms firewall umask dns usbguard" ;; esac
+    case "$m" in sysctl | modules | coredump | perms | firewall | umask | usbguard) ;; *) die "unknown module '$m'. Modules: sysctl modules coredump perms firewall umask usbguard" ;; esac
   done
   if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ] && have timeshift; then
     confirm "Create a Timeshift snapshot first?" && timeshift --create --comments "shieldctl pre-harden"
@@ -946,7 +918,7 @@ USAGE: $PROG <command> [options]
   install [--usbguard] [--firewall]
                                  install lynis rkhunter clamav aide fail2ban auditd
   harden [module...]             default: sysctl modules coredump perms firewall
-                                 extra:   umask dns usbguard   (or: all)
+                                 extra:   umask usbguard   (or: all)
   rollback                       undo everything shieldctl changed
   services [list|disable <n>..]  review/disable risky services (reversible)
   scan <what>                    audit | rootkit | malware | integrity | updates | ports | all
@@ -961,7 +933,6 @@ OPTIONS
   -n, --dry-run     show what would change, change nothing
   -y, --yes         assume yes
   -q, --quiet       only warnings/errors (used by timers)
-      --strict      dns: try mandatory DNS-over-TLS first (auto-falls back)
       --path DIR    scan malware: directory to scan (repeatable)
       --bg          aide: run in background via systemd-run
 EOF
@@ -975,7 +946,6 @@ main() {
       -n | --dry-run) DRY_RUN=1 ;;
       -y | --yes) ASSUME_YES=1 ;;
       -q | --quiet) QUIET=1 ;;
-      --strict) STRICT=1 ;;
       --bg) BG=1 ;;
       --no-accept) NO_ACCEPT=1 ;;
       --path) shift; [ -n "${1:-}" ] || die "--path needs a directory"; SCAN_PATHS+=("$1") ;;
