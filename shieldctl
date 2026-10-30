@@ -290,7 +290,7 @@ h_umask() {
 
 h_firewall() {
   info "firewall: deny unsolicited incoming traffic and allow outgoing traffic"
-  local listeners specs spec proto address port allow_specs=() blocked_specs=()
+  local listeners spec proto address port allow_specs=() blocked_specs=()
   listeners="$(exposed_listeners)"
   if [ -n "$listeners" ]; then
     warn "Firewall warning: default-deny incoming may block these listeners:"
@@ -302,28 +302,14 @@ h_firewall() {
         info "dry-run: would ask whether to preserve $proto/$port"
         continue
       fi
-      if confirm "Preserve $proto/$port with a firewall allow rule?"; then
-        allow_specs+=("$proto|$port")
-      else
+      if confirm "Block and close $proto/$port?"; then
         blocked_specs+=("$proto|$port")
+        warn "Selected: $proto/$port will be blocked"
+      else
+        allow_specs+=("$proto|$port")
+        info "Selected: $proto/$port will remain allowed"
       fi
     done <<<"$(exposed_listener_specs)"
-    if [ "$DRY_RUN" -eq 0 ] && [ ${#blocked_specs[@]} -gt 0 ]; then
-      warn "The following listeners will be blocked by default-deny:"
-      for spec in "${blocked_specs[@]}"; do
-        IFS='|' read -r proto port <<<"$spec"
-        warn "  - $proto/$port"
-      done
-      if ! confirm "Confirm blocking these unapproved listeners?"; then
-        warn "Firewall skipped to avoid changing listener reachability."
-        return 1
-      fi
-    fi
-    if [ "$DRY_RUN" -eq 0 ] && [ ${#allow_specs[@]} -eq 0 ] &&
-      [ ${#blocked_specs[@]} -eq 0 ]; then
-      warn "No listener decisions were made; firewall skipped."
-      return 1
-    fi
   fi
   if [ "$LIVE" -eq 0 ]; then info "(skipped in test mode)"; return 0; fi
   if have ufw; then
@@ -331,6 +317,11 @@ h_firewall() {
       IFS='|' read -r proto port <<<"$spec"
       run ufw allow "$port/$proto"
       info "Allowed $proto/$port before default-deny rules"
+    done
+    for spec in "${blocked_specs[@]}"; do
+      IFS='|' read -r proto port <<<"$spec"
+      run ufw insert 1 deny "$port/$proto"
+      info "Blocked $proto/$port before default-deny rules"
     done
     run ufw default deny incoming
     run ufw default allow outgoing
@@ -700,8 +691,9 @@ exposed_listener_specs() {
     awk '$5 !~ /^(127\.|\[::1\]|::1|localhost)/ {
       endpoint=$5
       sub(/^.*:/, "", endpoint)
-      print $1 "|" $5 "|" endpoint
-    }' | sort -t'|' -k1,1 -k3,3 -k2,2 -u
+      key=$1 "|" endpoint
+      if (!seen[key]++) print $1 "|" $5 "|" endpoint
+    }' | sort -t'|' -k1,1 -k3,3 -k2,2
 }
 
 fw_state() {

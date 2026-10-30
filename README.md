@@ -171,10 +171,17 @@ Hardening is intentionally verbose. Each module prints:
 
 Before enabling a firewall, shieldctl lists every exposed TCP and UDP listener,
 including its address, protocol, and port. It asks whether each listener should
-remain reachable. Answering no marks that listener for default-deny blocking.
-The complete block list is shown again and must be confirmed before the firewall
-is changed. If a desktop notification session is available, shieldctl also sends
-a firewall-review notification. This applies to SSH, web servers, databases,
+remain reachable:
+
+```text
+Block and close tcp/22? [y/N]
+Block and close udp/546? [y/N]
+```
+
+Answer `Y` to block and close that listener, or `N` to preserve it with an
+allow rule. Duplicate addresses for the same protocol/port are reviewed once.
+If a desktop notification session is available, shieldctl also sends a
+firewall-review notification. This applies to SSH, web servers, databases,
 containers, VM bridges, discovery services, and dynamically assigned ports.
 
 If you are connected remotely, preserve your SSH listener when prompted. For a
@@ -193,7 +200,9 @@ sudo shieldctl harden --yes
 ```
 
 Review the displayed listeners carefully. A firewall may make other services,
-VM bridges, discovery protocols, or application ports unreachable.
+VM bridges, discovery protocols, or application ports unreachable. `--yes`
+answers every port prompt with `Y`, so use it only after reviewing the
+listeners.
 
 ## Command reference
 
