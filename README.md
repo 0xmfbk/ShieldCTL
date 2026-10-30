@@ -44,6 +44,78 @@ Most checks degrade gracefully when optional tools are unavailable. The stronges
 integration is expected on Debian-family systems; Fedora, Arch, and openSUSE use
 best-effort package and service mappings.
 
+## Docker test prerequisites
+
+Docker is **not installed automatically by shieldctl**. Installing a system
+container runtime requires administrator approval and distribution-specific
+repository configuration. Install Docker only if you want to run the optional
+container test harness.
+
+Check whether Docker and Compose are already available:
+
+```bash
+docker --version
+docker compose version
+```
+
+If either command is missing, install Docker using your distribution's official
+packages or documentation.
+
+### Debian, Ubuntu, and Pop!_OS
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Apply the group change by logging out and back in, or run:
+
+```bash
+newgrp docker
+```
+
+### Fedora
+
+```bash
+sudo dnf install -y docker docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed docker docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+### openSUSE
+
+```bash
+sudo zypper install docker docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+Verify the installation before running the project tests:
+
+```bash
+docker --version
+docker compose version
+docker run --rm hello-world
+```
+
+If your distribution does not provide `docker compose` as a plugin, use the
+distribution-supported Compose package or Docker's official installation
+documentation. Do not run the test harness with `sudo` unless your Docker
+installation specifically requires it.
+
 ## Installation
 
 From a checkout:
@@ -326,6 +398,7 @@ The repository includes a safe container harness for CLI, syntax, ShellCheck,
 dry-run, isolated hardening-file, rollback, and distro-package checks:
 
 ```bash
+docker compose build
 docker compose run --rm debian
 docker compose run --rm fedora
 ```
