@@ -160,6 +160,41 @@ For a disposable VM, snapshot the VM before testing. On a physical system, ensur
 you have console access or a tested recovery route before changing firewall or
 network settings.
 
+### Hardening output and firewall safety
+
+Hardening is intentionally verbose. Each module prints:
+
+- What the module is about to change
+- The files, kernel settings, services, or firewall actions involved
+- Whether the step completed, was skipped, or failed
+- A final count of requested, completed, and skipped/failed steps
+
+Before enabling a firewall, shieldctl lists every exposed TCP and UDP listener,
+including its address, protocol, and port. It asks whether each listener should
+remain reachable. Answering no marks that listener for default-deny blocking.
+The complete block list is shown again and must be confirmed before the firewall
+is changed. If a desktop notification session is available, shieldctl also sends
+a firewall-review notification. This applies to SSH, web servers, databases,
+containers, VM bridges, discovery services, and dynamically assigned ports.
+
+If you are connected remotely, preserve your SSH listener when prompted. For a
+planned non-interactive run, add the required rules before hardening:
+
+```bash
+sudo ufw allow OpenSSH
+sudo shieldctl harden
+```
+
+Or, if you have verified every required port and want the command to answer
+prompts automatically:
+
+```bash
+sudo shieldctl harden --yes
+```
+
+Review the displayed listeners carefully. A firewall may make other services,
+VM bridges, discovery protocols, or application ports unreachable.
+
 ## Command reference
 
 ### Status and reporting

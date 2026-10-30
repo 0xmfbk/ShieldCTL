@@ -289,9 +289,49 @@ h_umask() {
 }
 
 h_firewall() {
-  info "firewall"
+  info "firewall: deny unsolicited incoming traffic and allow outgoing traffic"
+  local listeners specs spec proto address port allow_specs=() blocked_specs=()
+  listeners="$(exposed_listeners)"
+  if [ -n "$listeners" ]; then
+    warn "Firewall warning: default-deny incoming may block these listeners:"
+    notify_user "Firewall review required: exposed listeners will be allowed or blocked before default-deny."
+    while IFS='|' read -r proto address port; do
+      [ -n "$port" ] || continue
+      warn "  - $proto port $port on $address"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        info "dry-run: would ask whether to preserve $proto/$port"
+        continue
+      fi
+      if confirm "Preserve $proto/$port with a firewall allow rule?"; then
+        allow_specs+=("$proto|$port")
+      else
+        blocked_specs+=("$proto|$port")
+      fi
+    done <<<"$(exposed_listener_specs)"
+    if [ "$DRY_RUN" -eq 0 ] && [ ${#blocked_specs[@]} -gt 0 ]; then
+      warn "The following listeners will be blocked by default-deny:"
+      for spec in "${blocked_specs[@]}"; do
+        IFS='|' read -r proto port <<<"$spec"
+        warn "  - $proto/$port"
+      done
+      if ! confirm "Confirm blocking these unapproved listeners?"; then
+        warn "Firewall skipped to avoid changing listener reachability."
+        return 1
+      fi
+    fi
+    if [ "$DRY_RUN" -eq 0 ] && [ ${#allow_specs[@]} -eq 0 ] &&
+      [ ${#blocked_specs[@]} -eq 0 ]; then
+      warn "No listener decisions were made; firewall skipped."
+      return 1
+    fi
+  fi
   if [ "$LIVE" -eq 0 ]; then info "(skipped in test mode)"; return 0; fi
   if have ufw; then
+    for spec in "${allow_specs[@]}"; do
+      IFS='|' read -r proto port <<<"$spec"
+      run ufw allow "$port/$proto"
+      info "Allowed $proto/$port before default-deny rules"
+    done
     run ufw default deny incoming
     run ufw default allow outgoing
     run ufw logging on
@@ -300,10 +340,30 @@ h_firewall() {
       info "libvirt bridge detected: allowing traffic on virbr0 (VM DHCP/DNS)"
       run ufw allow in on virbr0
     fi
+    info "Firewall result (UFW):"
+    if [ "$DRY_RUN" -eq 0 ]; then
+      ufw status verbose | sed 's/^/  /'
+    else
+      info "dry-run: UFW would deny incoming, allow outgoing, and enable logging"
+    fi
   elif have firewall-cmd; then
+    for spec in "${allow_specs[@]}"; do
+      IFS='|' read -r proto port <<<"$spec"
+      run firewall-cmd --permanent --add-port="$port/$proto"
+      info "Allowed $proto/$port before firewalld activation"
+    done
     run systemctl enable --now firewalld
+    run firewall-cmd --reload
+    info "Firewall result (firewalld):"
+    if [ "$DRY_RUN" -eq 0 ]; then
+      firewall-cmd --state | sed 's/^/  /'
+      firewall-cmd --list-all | sed 's/^/  /'
+    else
+      info "dry-run: firewalld would be enabled and reloaded"
+    fi
   else
     warn "no ufw/firewalld found. Install one: sudo $PROG install --firewall"
+    return 1
   fi
 }
 
@@ -334,17 +394,51 @@ cmd_harden() {
   need_root
   init_state
   local mods=("$@") m
+  local completed=0 failed=0
   [ ${#mods[@]} -eq 0 ] && mods=(sysctl modules coredump perms firewall)
   [ "${mods[0]}" = recommended ] && mods=(sysctl modules coredump perms firewall)
   [ "${mods[0]}" = all ] && mods=(sysctl modules coredump perms firewall umask)
   for m in "${mods[@]}"; do
     case "$m" in sysctl | modules | coredump | perms | firewall | umask | usbguard) ;; *) die "unknown module '$m'. Modules: sysctl modules coredump perms firewall umask usbguard" ;; esac
   done
+  info "Hardening plan: ${mods[*]}"
+  info "Every step below reports its intended effect and result."
   if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ] && have timeshift; then
-    confirm "Create a Timeshift snapshot first?" && timeshift --create --comments "shieldctl pre-harden"
+    if confirm "Create a Timeshift snapshot first?"; then
+      timeshift --create --comments "shieldctl pre-harden" &&
+        ok "snapshot created" || warn "snapshot creation failed; continuing without snapshot"
+    else
+      info "snapshot not created"
+    fi
   fi
-  for m in "${mods[@]}"; do "h_$m"; done
-  ok "done. Undo anything with: sudo $PROG rollback"
+  for m in "${mods[@]}"; do
+    printf '\n%s--- Step: %s ---%s\n' "$C_B" "$m" "$C_N"
+    case "$m" in
+      sysctl) info "Tests and applies supported kernel/network sysctl values, skipping unsupported keys." ;;
+      modules) info "Writes module deny rules for selected obsolete or high-risk kernel modules." ;;
+      coredump) info "Disables traditional and systemd core dumps." ;;
+      perms) info "Tightens selected permissions only; existing permissions are backed up." ;;
+      firewall) info "Warns about listeners and SSH before applying default-deny incoming rules." ;;
+      umask) info "Sets the login default umask to 027 for new files." ;;
+      usbguard) info "Generates a USB policy and checks for keyboard/mouse lockout risk." ;;
+    esac
+    if "h_$m"; then
+      ok "step completed: $m"
+      completed=$((completed + 1))
+    else
+      warn "step skipped or failed: $m"
+      failed=$((failed + 1))
+    fi
+  done
+  printf '\n%s=== Hardening summary ===%s\n' "$C_B" "$C_N"
+  printf '  Requested: %d\n  Completed: %d\n  Skipped/failed: %d\n' \
+    "${#mods[@]}" "$completed" "$failed"
+  if [ "$failed" -eq 0 ]; then
+    ok "hardening completed. Undo managed changes with: sudo $PROG rollback"
+    return 0
+  fi
+  warn "hardening completed with skipped/failed steps. Review the warnings before continuing."
+  return 1
 }
 
 cmd_rollback() {
@@ -600,6 +694,16 @@ exposed_listeners() {
   ss -H -tuln 2>/dev/null | awk '{print $5}' | grep -vE '^(127\.|\[::1\]|::1|localhost)' | sort -u
 }
 
+exposed_listener_specs() {
+  have ss || return 0
+  ss -H -tuln 2>/dev/null |
+    awk '$5 !~ /^(127\.|\[::1\]|::1|localhost)/ {
+      endpoint=$5
+      sub(/^.*:/, "", endpoint)
+      print $1 "|" $5 "|" endpoint
+    }' | sort -t'|' -k1,1 -k3,3 -k2,2 -u
+}
+
 fw_state() {
   if systemctl is-active --quiet ufw 2>/dev/null; then echo ufw
   elif systemctl is-active --quiet firewalld 2>/dev/null; then echo firewalld
@@ -614,7 +718,13 @@ count_updates() { # prints "total security"
       local l; l="$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep '^Inst' || true)"
       echo "$(printf '%s' "$l" | grep -c . || true) $(printf '%s' "$l" | grep -ci security || true)" ;;
     dnf) echo "$(dnf -q check-update 2>/dev/null | grep -cE '^[A-Za-z0-9_.+-]+\.[a-z0-9_]+ ' || true) ?" ;;
-    pacman) have checkupdates && echo "$(checkupdates 2>/dev/null | wc -l) ?" || echo "? ?" ;;
+    pacman)
+      if have checkupdates; then
+        echo "$(checkupdates 2>/dev/null | wc -l) ?"
+      else
+        echo "? ?"
+      fi
+      ;;
     *) echo "? ?" ;;
   esac
 }
