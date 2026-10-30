@@ -36,6 +36,16 @@ else
 fi
 
 # ----------------------------------------------------------------- helpers
+banner() {
+  [ "$QUIET" -eq 1 ] && return 0
+  printf '%s\n' \
+    "${C_B}========================================${C_N}" \
+    "${C_B}              ShieldCTL${C_N}" \
+    "${C_D}     Linux security and hardening toolkit${C_N}" \
+    "${C_B}========================================${C_N}"
+  printf '\n'
+}
+
 info() { [ "$QUIET" -eq 1 ] || printf '%s[*]%s %s\n' "$C_B" "$C_N" "$*"; }
 ok()   { [ "$QUIET" -eq 1 ] || printf '%s[+]%s %s\n' "$C_G" "$C_N" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$C_Y" "$C_N" "$*" >&2; }
@@ -969,8 +979,8 @@ main() {
       --bg) BG=1 ;;
       --no-accept) NO_ACCEPT=1 ;;
       --path) shift; [ -n "${1:-}" ] || die "--path needs a directory"; SCAN_PATHS+=("$1") ;;
-      -h | --help | help) usage; exit 0 ;;
-      -v | --version | version) echo "$PROG $VERSION"; exit 0 ;;
+      -h | --help | help) banner; usage; exit 0 ;;
+      -v | --version | version) banner; echo "$PROG $VERSION"; exit 0 ;;
       *) pos+=("$1") ;;
     esac
     shift
@@ -978,6 +988,7 @@ main() {
   set -- ${pos[@]+"${pos[@]}"}
   local cmd="${1:-}"
   [ $# -gt 0 ] && shift
+  banner
   case "$cmd" in
     "" | menu) cmd_menu ;;
     status) cmd_status ;;
