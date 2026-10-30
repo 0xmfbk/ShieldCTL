@@ -17,12 +17,12 @@ fail() {
 
 assert_contains() {
   local text="$1" expected="$2"
-  grep -Fq "$expected" <<<"$text" || fail "expected output to contain: $expected"
+  grep -Fq -- "$expected" <<<"$text" || fail "expected output to contain: $expected"
 }
 
 assert_not_contains() {
   local text="$1" unexpected="$2"
-  ! grep -Fq "$unexpected" <<<"$text" || fail "unexpected output: $unexpected"
+  ! grep -Fq -- "$unexpected" <<<"$text" || fail "unexpected output: $unexpected"
 }
 
 bash -n "$TOOL"

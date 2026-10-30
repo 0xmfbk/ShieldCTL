@@ -259,7 +259,9 @@ h_perms() {
   local e m f cur n=0
   for e in "${PERMS[@]}"; do
     m="${e%% *}"; f="$ETC${e#* /etc}"
-    [ -e "$f" ] && [ ! -L "$f" ] || continue
+    if [ ! -e "$f" ] || [ -L "$f" ]; then
+      continue
+    fi
     cur="$(stat -c %a "$f")"
     if (( (8#$cur & ~8#$m) == 0 )); then continue; fi
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -444,15 +446,23 @@ cmd_install() {
   if have systemctl && have freshclam; then
     run systemctl enable --now clamav-freshclam >/dev/null 2>&1 || true
   fi
-  have auditctl && run systemctl enable --now auditd >/dev/null 2>&1 || true
-  have fail2ban-client && run systemctl enable --now fail2ban >/dev/null 2>&1 || true
+  if have auditctl; then
+    run systemctl enable --now auditd >/dev/null 2>&1 || true
+  fi
+  if have fail2ban-client; then
+    run systemctl enable --now fail2ban >/dev/null 2>&1 || true
+  fi
   if [ "$DRY_RUN" -eq 0 ] && have systemctl; then
     case "$PM" in
       apt-get) run systemctl enable --now apt-daily-upgrade.timer >/dev/null 2>&1 || true ;;
       dnf) run systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 || true ;;
     esac
   fi
-  [ ${#failed[@]} -eq 0 ] && ok "all tools installed" || warn "not installed: ${failed[*]} (may need extra repos such as EPEL)"
+  if [ ${#failed[@]} -eq 0 ]; then
+    ok "all tools installed"
+  else
+    warn "not installed: ${failed[*]} (may need extra repos such as EPEL)"
+  fi
 }
 
 # --------------------------------------------------------------------- AIDE
@@ -728,10 +738,18 @@ cmd_status() {
     chk info "Disk encryption" "not detected (enable during OS installation or with a distro-specific migration tool)"
   fi
   if have mokutil; then
-    mokutil --sb-state 2>/dev/null | grep -qi enabled && chk ok "Secure Boot" "enabled" || chk info "Secure Boot" "disabled (optional)"
+    if mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+      chk ok "Secure Boot" "enabled"
+    else
+      chk info "Secure Boot" "disabled (optional)"
+    fi
   fi
   local fw; fw="$(fw_state)"
-  [ "$fw" = none ] && chk warn "Firewall" "none active" || chk ok "Firewall" "$fw"
+  if [ "$fw" = none ]; then
+    chk warn "Firewall" "none active"
+  else
+    chk ok "Firewall" "$fw"
+  fi
   if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]; then chk ok "Mandatory access control" "AppArmor"
   elif have getenforce && [ "$(getenforce 2>/dev/null)" = Enforcing ]; then chk ok "Mandatory access control" "SELinux enforcing"
   else chk warn "Mandatory access control" "none"; fi
@@ -751,7 +769,11 @@ cmd_status() {
   fi
   if have aide; then
     aide_setup 2>/dev/null
-    [ -f "$DB_IN" ] && chk ok "AIDE baseline" "present" || chk warn "AIDE baseline" "missing (sudo $PROG aide init)"
+    if [ -f "$DB_IN" ]; then
+      chk ok "AIDE baseline" "present"
+    else
+      chk warn "AIDE baseline" "missing (sudo $PROG aide init)"
+    fi
   else chk info "AIDE" "not installed"; fi
 
   printf '\n%sKernel hardening%s\n' "$C_B" "$C_N"
@@ -763,7 +785,11 @@ cmd_status() {
     cur="$(sysctl -n "$k" 2>/dev/null)"
     [ "$cur" = "$v" ] && good=$((good + 1))
   done
-  [ "$good" -eq "$tot" ] && chk ok "sysctl" "$good/$tot keys hardened" || chk warn "sysctl" "$good/$tot hardened (sudo $PROG harden sysctl)"
+  if [ "$good" -eq "$tot" ]; then
+    chk ok "sysctl" "$good/$tot keys hardened"
+  else
+    chk warn "sysctl" "$good/$tot hardened (sudo $PROG harden sysctl)"
+  fi
 
   printf '\n%sExposure and hygiene%s\n' "$C_B" "$C_N"
   local l n; l="$(exposed_listeners)"; n="$(printf '%s' "$l" | grep -c . || true)"
@@ -773,7 +799,11 @@ cmd_status() {
   if [ "$t" = "?" ]; then chk info "Pending updates" "unknown"
   elif [ "$t" -eq 0 ]; then chk ok "Pending updates" "none"
   else chk warn "Pending updates" "$t ($s security)"; fi
-  [ -f /var/run/reboot-required ] && chk warn "Reboot" "required" || chk ok "Reboot" "not required"
+  if [ -f /var/run/reboot-required ]; then
+    chk warn "Reboot" "required"
+  else
+    chk ok "Reboot" "not required"
+  fi
   local s2
   for s2 in "${RISKY_SERVICES[@]}"; do
     systemctl is-active --quiet "$s2" 2>/dev/null && chk warn "Service $s2" "running (see: $PROG services list)"
@@ -800,8 +830,9 @@ sched_valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]]; }
 
 sched_add() {
   local name="${1:-}" task="${2:-}" when="${3:-}"
-  [ -n "$name" ] && [ -n "$task" ] && [ -n "$when" ] ||
+  if [ -z "$name" ] || [ -z "$task" ] || [ -z "$when" ]; then
     die "usage: $PROG schedule add <name> \"<task>\" <daily|weekly|monthly|'OnCalendar expr'>"
+  fi
   sched_valid_name "$name" || die "name must be lowercase letters, digits, dashes"
   [[ "$task" =~ $TASK_RE ]] || die "task must be one of: scan audit|rootkit|malware|integrity|updates|ports|all, or status (aide update is manual on purpose)"
   case "$SELF" in /usr/bin/* | /usr/sbin/* | /usr/local/bin/* | /usr/local/sbin/* | /opt/*) ;; *)
@@ -835,8 +866,12 @@ RandomizedDelaySec=10min
 WantedBy=timers.target
 EOF
   if [ "$LIVE" -eq 1 ]; then
-    systemctl daemon-reload && systemctl enable --now "shieldctl-$name.timer" >/dev/null 2>&1 &&
-      ok "scheduled '$name': $task ($when)" || die "could not enable timer"
+    if systemctl daemon-reload &&
+      systemctl enable --now "shieldctl-$name.timer" >/dev/null 2>&1; then
+      ok "scheduled '$name': $task ($when)"
+    else
+      die "could not enable timer"
+    fi
   else ok "wrote unit files (test mode)"; fi
 }
 
@@ -847,7 +882,9 @@ cmd_schedule() {
     add) need_root; init_state; sched_add "$@" ;;
     remove)
       need_root
-      [ -n "${1:-}" ] && sched_valid_name "$1" || die "usage: $PROG schedule remove <name>"
+      if [ -z "${1:-}" ] || ! sched_valid_name "$1"; then
+        die "usage: $PROG schedule remove <name>"
+      fi
       if [ "$LIVE" -eq 1 ]; then run systemctl disable --now "shieldctl-$1.timer" 2>/dev/null; fi
       [ "$DRY_RUN" -eq 1 ] || rm -f "$SYSD/shieldctl-$1.timer" "$SYSD/shieldctl-$1.service"
       if [ "$LIVE" -eq 1 ]; then run systemctl daemon-reload; fi
@@ -855,7 +892,9 @@ cmd_schedule() {
     list) systemctl list-timers --all --no-pager 'shieldctl-*' 2>/dev/null || true ;;
     run)
       need_root
-      [ -n "${1:-}" ] && sched_valid_name "$1" || die "usage: $PROG schedule run <name>"
+      if [ -z "${1:-}" ] || ! sched_valid_name "$1"; then
+        die "usage: $PROG schedule run <name>"
+      fi
       run systemctl start "shieldctl-$1.service" ;;
     defaults)
       need_root; init_state
