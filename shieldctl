@@ -1,0 +1,971 @@
+#!/usr/bin/env bash
+# shieldctl - lightweight Linux hardening, audit and scheduling toolkit
+# License: MIT
+#
+# Design rules (learned the hard way):
+#   * every change is reversible (drop-in files + backups + rollback)
+#   * --dry-run shows what would happen without touching anything
+#   * kernel keys are tested before being persisted (no "Invalid argument" noise)
+#   * risky actions (DNS, USBGuard, services) are opt-in and self-verifying
+set -uo pipefail
+
+readonly VERSION="1.0.0"
+readonly PROG="shieldctl"
+ETC="${SHIELDCTL_ETC:-/etc}"
+STATE_DIR="${SHIELDCTL_STATE:-/var/lib/shieldctl}"
+LOG_DIR="${SHIELDCTL_LOG:-/var/log/shieldctl}"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+LIVE=0
+[ "$ETC" = "/etc" ] && LIVE=1
+
+DRY_RUN=0
+ASSUME_YES=0
+QUIET=0
+STRICT=0
+BG=0
+NO_ACCEPT=0
+SCAN_PATHS=()
+ORIG_ARGS="$*"
+TASK_LOG=""
+PM=""
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[34m'; C_D=$'\e[2m'; C_N=$'\e[0m'
+else
+  C_R=""; C_G=""; C_Y=""; C_B=""; C_D=""; C_N=""
+fi
+
+# ----------------------------------------------------------------- helpers
+info() { [ "$QUIET" -eq 1 ] || printf '%s[*]%s %s\n' "$C_B" "$C_N" "$*"; }
+ok()   { [ "$QUIET" -eq 1 ] || printf '%s[+]%s %s\n' "$C_G" "$C_N" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$C_Y" "$C_N" "$*" >&2; }
+err()  { printf '%s[x]%s %s\n' "$C_R" "$C_N" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "This command needs root. Run: sudo $PROG $ORIG_ARGS"
+}
+
+confirm() {
+  [ "$ASSUME_YES" -eq 1 ] && return 0
+  [ -t 0 ] || return 1
+  local a
+  read -r -p "$1 [y/N] " a
+  case "$a" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
+}
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '%s[dry-run]%s %s\n' "$C_Y" "$C_N" "$*"
+    return 0
+  fi
+  "$@"
+}
+
+init_state() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  mkdir -p "$STATE_DIR/backups" "$LOG_DIR" || die "cannot create $STATE_DIR / $LOG_DIR"
+  chmod 700 "$STATE_DIR"
+  chmod 750 "$LOG_DIR"
+}
+
+track() {
+  grep -qxF "$1" "$STATE_DIR/manifest" 2>/dev/null || echo "$1" >>"$STATE_DIR/manifest"
+}
+
+# write_managed PATH [MODE] < content : writes a file we own (removed on rollback)
+write_managed() {
+  local path="$1" mode="${2:-644}"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "would write $path"
+    cat >/dev/null
+    return 0
+  fi
+  mkdir -p "$(dirname "$path")" || return 1
+  cat >"$path" || return 1
+  chmod "$mode" "$path"
+  track "$path"
+  ok "wrote $path"
+}
+
+# backup_file PATH : copy of a file we are about to edit (restored on rollback)
+backup_file() {
+  local f="$1" b
+  [ -f "$f" ] || return 0
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  b="$STATE_DIR/backups/$(echo "$f" | tr / _).$(date +%Y%m%d%H%M%S)"
+  cp -p "$f" "$b" && printf '%s|%s\n' "$f" "$b" >>"$STATE_DIR/files.bak"
+}
+
+detect_pm() {
+  local p
+  for p in apt-get dnf pacman zypper; do
+    if have "$p"; then PM="$p"; return 0; fi
+  done
+  PM=""
+  return 1
+}
+
+pkg_name() {
+  case "$PM:$1" in
+    apt-get:clamav) echo "clamav clamav-daemon" ;;
+    dnf:clamav) echo "clamav clamav-update" ;;
+    apt-get:auditd) echo "auditd" ;;
+    dnf:auditd | zypper:auditd | pacman:auditd) echo "audit" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+pkg_install() {
+  case "$PM" in
+    apt-get) DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y "$@" ;;
+    dnf) dnf install -y "$@" ;;
+    pacman) pacman -S --noconfirm --needed "$@" ;;
+    zypper) zypper -n install "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+desktop_user() {
+  loginctl list-sessions --no-legend 2>/dev/null | while read -r sid _ user _; do
+    case "$(loginctl show-session "$sid" -p Type --value 2>/dev/null)" in
+      x11 | wayland) echo "$user"; break ;;
+    esac
+  done
+}
+
+target_user() {
+  local u="${SUDO_USER:-}"
+  if [ -z "$u" ] || [ "$u" = root ]; then u="$(desktop_user)"; fi
+  echo "$u"
+}
+
+notify_user() {
+  have notify-send || return 0
+  local u uid
+  u="$(desktop_user)"
+  [ -n "$u" ] || return 0
+  uid="$(id -u "$u" 2>/dev/null)" || return 0
+  runuser -u "$u" -- env "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+    notify-send -u critical "$PROG" "$1" >/dev/null 2>&1 || true
+}
+
+# ------------------------------------------------------- result bookkeeping
+task_log() {
+  TASK_LOG="$LOG_DIR/$1-$(date +%Y%m%d-%H%M%S).log"
+  : >"$TASK_LOG"
+}
+
+# finish TASK STATUS DETAIL  (STATUS: OK | WARN | FAIL | SKIP)
+finish() {
+  local t="$1" s="$2" d="$3"
+  if [ "$(id -u)" -eq 0 ] && [ -d "$STATE_DIR" ]; then
+    printf '%s|%s|%s|%s\n' "$(date -Is)" "$t" "$s" "$d" >>"$STATE_DIR/runs.log"
+    # keep the 20 newest logs per task
+    # shellcheck disable=SC2012
+    ls -1t "$LOG_DIR/$t-"*.log 2>/dev/null | tail -n +21 | xargs -r rm -f --
+  fi
+  logger -t "$PROG" "$t: $s - $d" 2>/dev/null || true
+  case "$s" in
+    OK) ok "$t: $d" ;;
+    WARN | SKIP) warn "$t: $d" ;;
+    *) err "$t: $d" ;;
+  esac
+  [ "$s" = OK ] && return 0
+  [ "$s" = SKIP ] || notify_user "$t: $s - $d"
+  return 1
+}
+
+# ---------------------------------------------------------------- hardening
+SYSCTLS=(
+  "kernel.kptr_restrict=2" "kernel.dmesg_restrict=1" "kernel.randomize_va_space=2"
+  "kernel.yama.ptrace_scope=1" "kernel.unprivileged_bpf_disabled=1" "net.core.bpf_jit_harden=2"
+  "kernel.kexec_load_disabled=1" "kernel.sysrq=0" "kernel.perf_event_paranoid=3"
+  "dev.tty.ldisc_autoload=0" "fs.suid_dumpable=0" "fs.protected_hardlinks=1"
+  "fs.protected_symlinks=1" "fs.protected_fifos=2" "fs.protected_regular=2"
+  "net.ipv4.tcp_syncookies=1" "net.ipv4.conf.all.rp_filter=1" "net.ipv4.conf.default.rp_filter=1"
+  "net.ipv4.conf.all.accept_redirects=0" "net.ipv4.conf.default.accept_redirects=0"
+  "net.ipv6.conf.all.accept_redirects=0" "net.ipv6.conf.default.accept_redirects=0"
+  "net.ipv4.conf.all.send_redirects=0" "net.ipv4.conf.all.accept_source_route=0"
+  "net.ipv6.conf.all.accept_source_route=0" "net.ipv4.conf.all.log_martians=1"
+  "net.ipv4.conf.default.log_martians=1" "net.ipv4.icmp_echo_ignore_broadcasts=1"
+  "net.ipv4.icmp_ignore_bogus_error_responses=1"
+)
+# NOTE: ip_forward and kernel.modules_disabled are deliberately NOT touched
+# (they break libvirt/Docker and driver loading respectively).
+
+BAD_MODULES=(dccp sctp rds tipc cramfs freevxfs jffs2 hfs hfsplus firewire-core)
+
+PERMS=(
+  "600 /etc/crontab" "700 /etc/cron.d" "700 /etc/cron.daily" "700 /etc/cron.hourly"
+  "700 /etc/cron.weekly" "700 /etc/cron.monthly" "600 /etc/ssh/sshd_config" "750 /etc/sudoers.d"
+)
+
+sysctl_path() { echo "/proc/sys/${1//./\/}"; }
+
+h_sysctl() {
+  info "sysctl: kernel and network hardening"
+  local kv k v out="" applied=0 skipped=0
+  for kv in "${SYSCTLS[@]}"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    if [ ! -e "$(sysctl_path "$k")" ]; then skipped=$((skipped + 1)); continue; fi
+    if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ]; then
+      if ! sysctl -qw "$k=$v" >/dev/null 2>&1; then
+        warn "skipped $k (kernel rejected value $v)"
+        skipped=$((skipped + 1)); continue
+      fi
+    fi
+    out+="$k = $v"$'\n'
+    applied=$((applied + 1))
+  done
+  printf '%s' "$out" | write_managed "$ETC/sysctl.d/99-shieldctl.conf"
+  if [ "$DRY_RUN" -eq 1 ]; then ok "sysctl: would apply $applied keys, $skipped unsupported/skipped"
+  else ok "sysctl: $applied keys applied, $skipped unsupported/skipped"; fi
+}
+
+h_modules() {
+  info "blocking unused kernel modules/protocols"
+  local m
+  {
+    echo "# managed by shieldctl"
+    for m in "${BAD_MODULES[@]}"; do echo "install $m /bin/true"; done
+  } | write_managed "$ETC/modprobe.d/shieldctl-blacklist.conf"
+}
+
+h_coredump() {
+  info "disabling core dumps"
+  printf '# managed by shieldctl\n* hard core 0\n' | write_managed "$ETC/security/limits.d/99-shieldctl-nocore.conf"
+  printf '[Coredump]\nStorage=none\nProcessSizeMax=0\n' | write_managed "$ETC/systemd/coredump.conf.d/shieldctl.conf"
+}
+
+h_perms() {
+  info "tightening permissions (only ever stricter, never looser)"
+  local e m f cur n=0
+  for e in "${PERMS[@]}"; do
+    m="${e%% *}"; f="$ETC${e#* /etc}"
+    [ -e "$f" ] && [ ! -L "$f" ] || continue
+    cur="$(stat -c %a "$f")"
+    if (( (8#$cur & ~8#$m) == 0 )); then continue; fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "would chmod $cur -> $m $f"
+    else
+      printf '%s|%s\n' "$f" "$cur" >>"$STATE_DIR/perms.bak"
+      chmod "$m" "$f" && n=$((n + 1))
+    fi
+  done
+  ok "permissions: $n paths tightened"
+}
+
+h_umask() {
+  info "default umask 027 (affects NEW files only; shared folders may need adjusting)"
+  local f="$ETC/login.defs"
+  [ -f "$f" ] || { warn "no $f"; return 0; }
+  backup_file "$f"
+  if [ "$DRY_RUN" -eq 1 ]; then info "would set UMASK 027 in $f"; return 0; fi
+  if grep -q '^UMASK' "$f"; then
+    sed -i 's/^UMASK.*/UMASK           027/' "$f"
+  else
+    echo 'UMASK           027' >>"$f"
+  fi
+  ok "umask set in $f"
+}
+
+h_firewall() {
+  info "firewall"
+  if [ "$LIVE" -eq 0 ]; then info "(skipped in test mode)"; return 0; fi
+  if have ufw; then
+    run ufw default deny incoming
+    run ufw default allow outgoing
+    run ufw logging on
+    run ufw --force enable
+    if [ -d /sys/class/net/virbr0 ]; then
+      info "libvirt bridge detected: allowing traffic on virbr0 (VM DHCP/DNS)"
+      run ufw allow in on virbr0
+    fi
+  elif have firewall-cmd; then
+    run systemctl enable --now firewalld
+  else
+    warn "no ufw/firewalld found. Install one: sudo $PROG install --firewall"
+  fi
+}
+
+h_dns() {
+  info "DNS over TLS (self-verifying)"
+  [ "$LIVE" -eq 1 ] || { info "(skipped in test mode)"; return 0; }
+  systemctl is-active --quiet systemd-resolved || { warn "systemd-resolved not active; skipping"; return 0; }
+  if ! getent hosts example.com >/dev/null 2>&1; then
+    warn "DNS is not working right now, so I cannot verify a change. Skipping."
+    return 0
+  fi
+  [ "$DRY_RUN" -eq 1 ] && { info "would configure DoT and verify resolution"; return 0; }
+  local modes=(opportunistic) mode f="$ETC/systemd/resolved.conf.d/shieldctl-dot.conf"
+  [ "$STRICT" -eq 1 ] && modes=(yes opportunistic)
+  for mode in "${modes[@]}"; do
+    printf '[Resolve]\nDNS=9.9.9.9#dns.quad9.net 1.1.1.1#cloudflare-dns.com\nDNSOverTLS=%s\nDNSSEC=allow-downgrade\n' "$mode" |
+      write_managed "$f"
+    systemctl restart systemd-resolved
+    sleep 3
+    if getent hosts example.com >/dev/null 2>&1; then
+      ok "DNS over TLS active (mode: $mode)"
+      return 0
+    fi
+    warn "DNS broke with mode '$mode' (network may block port 853); trying a safer mode"
+  done
+  rm -f "$f"
+  systemctl restart systemd-resolved
+  warn "DoT not usable on this network. Reverted to your original DNS settings."
+}
+
+h_usbguard() {
+  info "USBGuard (refuses to lock you out)"
+  [ "$LIVE" -eq 1 ] || { info "(skipped in test mode)"; return 0; }
+  have usbguard || { warn "usbguard not installed: sudo $PROG install --usbguard"; return 0; }
+  local rules="$ETC/usbguard/rules.conf" tmp
+  if [ -s "$rules" ] && [ "$ASSUME_YES" -eq 0 ]; then
+    warn "$rules already has rules; not overwriting (use --yes to replace)"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  usbguard generate-policy >"$tmp" 2>/dev/null || { rm -f "$tmp"; warn "could not generate policy"; return 1; }
+  if ! grep -q 'with-interface.*03:' "$tmp"; then
+    warn "No USB keyboard/mouse (HID) found in the policy."
+    warn "Fine on a laptop with an internal keyboard; dangerous with a USB keyboard that is unplugged."
+    confirm "Continue anyway?" || { rm -f "$tmp"; return 0; }
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then info "would install $(wc -l <"$tmp") rules"; rm -f "$tmp"; return 0; fi
+  backup_file "$rules"
+  install -m 600 "$tmp" "$rules"
+  rm -f "$tmp"
+  systemctl enable --now usbguard && ok "USBGuard active. Allow a new device: sudo usbguard allow-device <id> -p"
+}
+
+cmd_harden() {
+  need_root
+  init_state
+  local mods=("$@") m
+  [ ${#mods[@]} -eq 0 ] && mods=(sysctl modules coredump perms firewall)
+  [ "${mods[0]}" = recommended ] && mods=(sysctl modules coredump perms firewall)
+  [ "${mods[0]}" = all ] && mods=(sysctl modules coredump perms firewall umask dns)
+  for m in "${mods[@]}"; do
+    case "$m" in sysctl | modules | coredump | perms | firewall | umask | dns | usbguard) ;; *) die "unknown module '$m'. Modules: sysctl modules coredump perms firewall umask dns usbguard" ;; esac
+  done
+  if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ] && have timeshift; then
+    confirm "Create a Timeshift snapshot first?" && timeshift --create --comments "shieldctl pre-harden"
+  fi
+  for m in "${mods[@]}"; do "h_$m"; done
+  ok "done. Undo anything with: sudo $PROG rollback"
+}
+
+cmd_rollback() {
+  need_root
+  [ "$DRY_RUN" -eq 1 ] && { info "dry-run: would remove managed files and restore backups"; return 0; }
+  local f b mode svc was
+  if [ -f "$STATE_DIR/manifest" ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] && [ -e "$f" ] && rm -f "$f" && ok "removed $f"
+    done <"$STATE_DIR/manifest"
+    : >"$STATE_DIR/manifest"
+  fi
+  if [ -f "$STATE_DIR/files.bak" ]; then
+    awk -F'|' '!seen[$1]++' "$STATE_DIR/files.bak" | while IFS='|' read -r f b; do
+      [ -f "$b" ] && cp -p "$b" "$f" && ok "restored $f"
+    done
+    : >"$STATE_DIR/files.bak"
+  fi
+  if [ -f "$STATE_DIR/perms.bak" ]; then
+    awk -F'|' '!seen[$1]++' "$STATE_DIR/perms.bak" | while IFS='|' read -r f mode; do
+      [ -e "$f" ] && chmod "$mode" "$f" && ok "permissions restored on $f"
+    done
+    : >"$STATE_DIR/perms.bak"
+  fi
+  if [ -f "$STATE_DIR/services.bak" ]; then
+    while IFS='|' read -r svc was; do
+      [ "$was" = enabled ] && systemctl enable --now "$svc" >/dev/null 2>&1 && ok "re-enabled $svc"
+    done <"$STATE_DIR/services.bak"
+    : >"$STATE_DIR/services.bak"
+  fi
+  if [ "$LIVE" -eq 1 ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart systemd-resolved 2>/dev/null || true
+  fi
+  warn "Live sysctl values stay until reboot. The firewall is left enabled on purpose."
+}
+
+# ----------------------------------------------------------------- services
+RISKY_SERVICES=(avahi-daemon cups-browsed whoopsie apport ModemManager postfix rpcbind anydesk teamviewerd telnet.socket)
+
+cmd_services() {
+  local sub="${1:-list}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    list)
+      info "candidate services that are currently running:"
+      local s found=0
+      for s in "${RISKY_SERVICES[@]}"; do
+        if systemctl is-active --quiet "$s" 2>/dev/null; then printf '  - %s\n' "$s"; found=1; fi
+      done
+      [ "$found" -eq 1 ] || info "none of the usual suspects are running"
+      info "disable with: sudo $PROG services disable <name> [name...]"
+      ;;
+    disable)
+      need_root; init_state
+      [ $# -gt 0 ] || die "usage: $PROG services disable <name> [name...]"
+      local s was
+      for s in "$@"; do
+        systemctl cat "$s" >/dev/null 2>&1 || { warn "$s: not found"; continue; }
+        confirm "Disable and stop $s?" || continue
+        was="$(systemctl is-enabled "$s" 2>/dev/null || true)"
+        if [ "$DRY_RUN" -eq 0 ]; then printf '%s|%s\n' "$s" "$was" >>"$STATE_DIR/services.bak"; fi
+        run systemctl disable --now "$s"
+      done
+      ;;
+    *) die "usage: $PROG services [list|disable <name>...]" ;;
+  esac
+}
+
+# ------------------------------------------------------------------ install
+cmd_install() {
+  need_root
+  init_state
+  detect_pm || die "no supported package manager (apt/dnf/pacman/zypper)"
+  local want=(lynis rkhunter clamav aide fail2ban auditd) a
+  for a in "$@"; do
+    case "$a" in
+      --usbguard) want+=(usbguard) ;;
+      --firewall) want+=(ufw) ;;
+      *) die "unknown option $a" ;;
+    esac
+  done
+  [ "$PM" = apt-get ] && run apt-get update -qq
+  local t pk pkarr failed=()
+  for t in "${want[@]}"; do
+    pk="$(pkg_name "$t")"
+    info "installing $pk"
+    read -ra pkarr <<<"$pk"
+    run pkg_install "${pkarr[@]}" >/dev/null 2>&1 || { warn "could not install $pk"; failed+=("$t"); }
+  done
+  # rkhunter on Debian/Ubuntu ships a WEB_CMD that makes it error out, and its
+  # online --update no longer works. Neutralise the former.
+  if [ -f "$ETC/rkhunter.conf" ] && [ "$DRY_RUN" -eq 0 ]; then
+    grep -q '^WEB_CMD=""' "$ETC/rkhunter.conf.local" 2>/dev/null || echo 'WEB_CMD=""' >>"$ETC/rkhunter.conf.local"
+  fi
+  if have systemctl && have freshclam; then
+    run systemctl enable --now clamav-freshclam >/dev/null 2>&1 || true
+  fi
+  have auditctl && run systemctl enable --now auditd >/dev/null 2>&1 || true
+  have fail2ban-client && run systemctl enable --now fail2ban >/dev/null 2>&1 || true
+  [ ${#failed[@]} -eq 0 ] && ok "all tools installed" || warn "not installed: ${failed[*]} (may need extra repos such as EPEL)"
+}
+
+# --------------------------------------------------------------------- AIDE
+AIDE_CONF=""; DB_IN=""; DB_NEW=""
+
+aide_setup() {
+  have aide || die "aide is not installed (run: sudo $PROG install)"
+  local sfx=""
+  if [ -f /etc/aide/aide.conf ]; then AIDE_CONF=/etc/aide/aide.conf
+  elif [ -f /etc/aide.conf ]; then AIDE_CONF=/etc/aide.conf; sfx=".gz"
+  else die "AIDE config not found"; fi
+  DB_IN="/var/lib/aide/aide.db$sfx"
+  DB_NEW="/var/lib/aide/aide.db.new$sfx"
+}
+
+aide_excludes() {
+  local d="$ETC/aide/aide.conf.d"
+  [ -d "$d" ] || { warn "no $d: add your own exclusions to $AIDE_CONF"; return 0; }
+  # prefix 01 so it loads BEFORE the stock rules (first match wins)
+  cat <<'EOF' | write_managed "$d/01_shieldctl_excludes"
+!/run
+!/media
+!/mnt
+!/home
+!/root/.cache
+!/var/lib/libvirt
+!/var/lib/flatpak
+!/var/lib/snapd
+!/var/cache
+!/var/log
+!/var/tmp
+!/tmp
+!/snap
+!/timeshift
+!/recovery
+!/var/spool
+!/var/lib/clamav
+!/var/lib/aide
+!/var/lib/upower
+!/var/lib/fail2ban
+!/var/lib/sysstat
+!/var/lib/chrony
+!/var/lib/PackageKit
+!/var/lib/apt/lists
+!/usr/share/doc
+!/usr/share/man
+!/usr/share/locale
+EOF
+}
+
+aide_hash_save() {
+  sha256sum "$DB_IN" | cut -d' ' -f1 >"$STATE_DIR/aide.sha256"
+  chmod 600 "$STATE_DIR/aide.sha256"
+  ok "database SHA256: $(cat "$STATE_DIR/aide.sha256")"
+  info "write this hash down OUTSIDE this machine; it proves the baseline was not altered"
+}
+
+aide_init() {
+  aide_excludes
+  aide -c "$AIDE_CONF" --config-check >/dev/null 2>&1 || die "AIDE config check failed: aide -c $AIDE_CONF --config-check"
+  if [ -f "$DB_IN" ] && ! confirm "A baseline already exists. Rebuild it from the CURRENT state?"; then return 0; fi
+  info "building baseline (10-25 minutes; low priority)"
+  task_log aide-init
+  aide -c "$AIDE_CONF" --init >"$TASK_LOG" 2>&1
+  [ -f "$DB_NEW" ] || die "no database produced, see $TASK_LOG"
+  cp -p "$DB_NEW" "$DB_IN" && chmod 600 "$DB_IN"
+  aide_hash_save
+}
+
+aide_check() {
+  task_log integrity
+  if [ ! -f "$DB_IN" ]; then
+    finish integrity WARN "no baseline yet: sudo $PROG aide init"; return 1
+  fi
+  if [ -f "$STATE_DIR/aide.sha256" ]; then
+    local cur; cur="$(sha256sum "$DB_IN" | cut -d' ' -f1)"
+    if [ "$cur" != "$(cat "$STATE_DIR/aide.sha256")" ]; then
+      finish integrity FAIL "baseline hash changed since last recorded: possible tampering!"; return 1
+    fi
+  fi
+  aide -c "$AIDE_CONF" --check >"$TASK_LOG" 2>&1
+  local rc=$? a r c crit
+  if [ "$rc" -eq 0 ]; then finish integrity OK "no changes"; return 0; fi
+  if [ "$rc" -ge 14 ]; then finish integrity FAIL "AIDE error (exit $rc), see $TASK_LOG"; return 1; fi
+  a="$(grep -m1 'Added entries:' "$TASK_LOG" | awk '{print $NF}')"
+  r="$(grep -m1 'Removed entries:' "$TASK_LOG" | awk '{print $NF}')"
+  c="$(grep -m1 'Changed entries:' "$TASK_LOG" | awk '{print $NF}')"
+  crit="$(grep -cE '^[fdlbcpsn][ +=<>.a-zA-Z0-9-]*: /(usr/(s?bin|lib|lib64|libexec)|s?bin|lib|lib64|boot|etc/(passwd|shadow|group|gshadow|sudoers))' "$TASK_LOG" || true)"
+  if [ "${crit:-0}" -gt 0 ]; then
+    finish integrity WARN "added=${a:-0} removed=${r:-0} changed=${c:-0}; $crit CRITICAL paths changed (expected right after package updates, otherwise investigate) log: $TASK_LOG"
+  else
+    finish integrity WARN "added=${a:-0} removed=${r:-0} changed=${c:-0} (no critical paths) log: $TASK_LOG"
+  fi
+  return 1
+}
+
+cmd_aide() {
+  local sub="${1:-}"
+  need_root; init_state; aide_setup
+  if [ "$BG" -eq 1 ] && [ -n "$sub" ]; then
+    local extra=""
+    [ "$sub" = update ] && extra="--no-accept"
+    # shellcheck disable=SC2086
+    systemd-run --unit="shieldctl-aide-$sub" --property=Nice=19 --property=IOSchedulingClass=idle \
+      "$SELF" aide "$sub" --yes $extra || die "systemd-run failed"
+    info "running in background. Follow: journalctl -fu shieldctl-aide-$sub"
+    return 0
+  fi
+  case "$sub" in
+    init) aide_init ;;
+    check) aide_check ;;
+    update)
+      [ -f "$DB_IN" ] || die "no baseline: sudo $PROG aide init"
+      task_log aide-update
+      aide -c "$AIDE_CONF" --update >"$TASK_LOG" 2>&1
+      grep -E 'Total number|Added entries|Removed entries|Changed entries' "$TASK_LOG" | sed 's/^/  /'
+      if [ "$NO_ACCEPT" -eq 1 ]; then
+        info "new baseline stored as $DB_NEW. Review $TASK_LOG then: sudo $PROG aide accept"
+      elif confirm "Accept these changes as the new baseline?"; then
+        cp -p "$DB_NEW" "$DB_IN" && chmod 600 "$DB_IN" && aide_hash_save
+      fi
+      ;;
+    accept)
+      [ -f "$DB_NEW" ] || die "nothing to accept ($DB_NEW missing)"
+      confirm "Replace the baseline with $DB_NEW (created $(date -r "$DB_NEW" '+%F %T'))?" || return 0
+      cp -p "$DB_NEW" "$DB_IN" && chmod 600 "$DB_IN" && aide_hash_save
+      ;;
+    *) die "usage: $PROG aide [init|check|update|accept] [--bg]   (always CHECK before UPDATE)" ;;
+  esac
+}
+
+# --------------------------------------------------------------------- scans
+exposed_listeners() {
+  have ss || return 0
+  ss -H -tuln 2>/dev/null | awk '{print $5}' | grep -vE '^(127\.|\[::1\]|::1|localhost)' | sort -u
+}
+
+fw_state() {
+  if systemctl is-active --quiet ufw 2>/dev/null; then echo ufw
+  elif systemctl is-active --quiet firewalld 2>/dev/null; then echo firewalld
+  elif have nft && [ "$(nft list ruleset 2>/dev/null | wc -l)" -gt 5 ]; then echo nftables
+  else echo none; fi
+}
+
+count_updates() { # prints "total security"
+  detect_pm 2>/dev/null || { echo "? ?"; return; }
+  case "$PM" in
+    apt-get)
+      local l; l="$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep '^Inst' || true)"
+      echo "$(printf '%s' "$l" | grep -c . || true) $(printf '%s' "$l" | grep -ci security || true)" ;;
+    dnf) echo "$(dnf -q check-update 2>/dev/null | grep -cE '^[A-Za-z0-9_.+-]+\.[a-z0-9_]+ ' || true) ?" ;;
+    pacman) have checkupdates && echo "$(checkupdates 2>/dev/null | wc -l) ?" || echo "? ?" ;;
+    *) echo "? ?" ;;
+  esac
+}
+
+t_audit() {
+  have lynis || { finish audit SKIP "lynis not installed (sudo $PROG install)"; return 1; }
+  task_log audit
+  lynis audit system --cronjob >"$TASK_LOG" 2>&1
+  local idx w
+  idx="$(grep -m1 '^hardening_index=' /var/log/lynis-report.dat 2>/dev/null | cut -d= -f2)"
+  w="$(grep -c '^warning\[\]' /var/log/lynis-report.dat 2>/dev/null || true)"
+  if [ -z "$idx" ]; then finish audit FAIL "no report produced, see $TASK_LOG"; return 1; fi
+  if [ "${w:-0}" -gt 0 ] || [ "$idx" -lt 70 ]; then
+    finish audit WARN "hardening index $idx, ${w:-0} warnings (lynis show report)"; return 1
+  fi
+  finish audit OK "hardening index $idx, 0 warnings"
+}
+
+t_rootkit() {
+  have rkhunter || { finish rootkit SKIP "rkhunter not installed (sudo $PROG install)"; return 1; }
+  task_log rootkit
+  rkhunter --check --sk --rwo >"$TASK_LOG" 2>&1
+  local w; w="$(grep -c '^Warning' "$TASK_LOG" || true)"
+  if grep -q 'Invalid' "$TASK_LOG"; then
+    finish rootkit FAIL "rkhunter config error, see $TASK_LOG"; return 1
+  fi
+  if [ "${w:-0}" -gt 0 ]; then
+    finish rootkit WARN "$w warnings (review $TASK_LOG; whitelist known-good in /etc/rkhunter.conf.local)"; return 1
+  fi
+  finish rootkit OK "clean"
+}
+
+t_malware() {
+  have clamscan || { finish malware SKIP "clamav not installed (sudo $PROG install)"; return 1; }
+  # shellcheck disable=SC2144
+  ls /var/lib/clamav/*.c[lv]d >/dev/null 2>&1 || { finish malware FAIL "no ClamAV signatures yet (sudo freshclam)"; return 1; }
+  local dirs=("${SCAN_PATHS[@]}") u h d valid=()
+  if [ ${#dirs[@]} -eq 0 ]; then
+    u="$(target_user)"
+    if [ -n "$u" ]; then h="$(getent passwd "$u" | cut -d: -f6)"; dirs=("$h/Downloads"); fi
+    dirs+=(/tmp /var/tmp)
+  fi
+  for d in "${dirs[@]}"; do [ -d "$d" ] && valid+=("$d"); done
+  [ ${#valid[@]} -gt 0 ] || { finish malware SKIP "no directories to scan"; return 1; }
+  task_log malware
+  if have ionice; then ionice -c3 nice -n19 clamscan -r -i "${valid[@]}" >"$TASK_LOG" 2>&1
+  else nice -n19 clamscan -r -i "${valid[@]}" >"$TASK_LOG" 2>&1; fi
+  local rc=$? n
+  n="$(grep -m1 'Infected files:' "$TASK_LOG" | awk '{print $NF}')"
+  if [ "$rc" -eq 1 ]; then finish malware FAIL "${n:-?} infected file(s)! see $TASK_LOG"; return 1; fi
+  if [ "$rc" -ne 0 ]; then finish malware FAIL "clamscan error (exit $rc), see $TASK_LOG"; return 1; fi
+  finish malware OK "clean (${valid[*]})"
+}
+
+t_updates() {
+  [ "$(id -u)" -eq 0 ] && [ "$PM" = apt-get ] && apt-get update -qq >/dev/null 2>&1
+  local t s
+  read -r t s <<<"$(count_updates)"
+  if [ "$t" = "?" ]; then finish updates SKIP "cannot determine pending updates on this distro"; return 1; fi
+  if [ "$t" -eq 0 ]; then finish updates OK "system is up to date"; return 0; fi
+  finish updates WARN "$t pending ($s security). Run: sudo apt update && sudo apt full-upgrade"
+}
+
+t_ports() {
+  local l n; l="$(exposed_listeners)"; n="$(printf '%s' "$l" | grep -c . || true)"
+  if [ "${n:-0}" -eq 0 ]; then finish ports OK "nothing listening on the network"; return 0; fi
+  if [ "$(fw_state)" = none ]; then
+    finish ports WARN "$n exposed listeners and NO firewall: $(echo "$l" | tr '\n' ' ')"; return 1
+  fi
+  finish ports OK "$n listeners behind firewall ($(fw_state)): $(echo "$l" | tr '\n' ' ')"
+}
+
+cmd_scan() {
+  local what="${1:-all}" rc=0
+  need_root; init_state
+  case "$what" in
+    audit) t_audit || rc=1 ;;
+    rootkit) t_rootkit || rc=1 ;;
+    malware) t_malware || rc=1 ;;
+    integrity) aide_setup; aide_check || rc=1 ;;
+    updates) t_updates || rc=1 ;;
+    ports) t_ports || rc=1 ;;
+    all)
+      t_updates || rc=1; t_ports || rc=1; t_rootkit || rc=1; t_malware || rc=1
+      if have aide; then aide_setup; aide_check || rc=1; fi
+      t_audit || rc=1 ;;
+    *) die "usage: $PROG scan [audit|rootkit|malware|integrity|updates|ports|all] [--path DIR]" ;;
+  esac
+  return "$rc"
+}
+
+# -------------------------------------------------------------------- status
+CHK_OK=0; CHK_TOT=0
+chk() { # ok|warn|info LABEL DETAIL
+  case "$1" in
+    ok) CHK_TOT=$((CHK_TOT + 1)); CHK_OK=$((CHK_OK + 1)); printf '  %s+%s %-26s %s\n' "$C_G" "$C_N" "$2" "$3" ;;
+    warn) CHK_TOT=$((CHK_TOT + 1)); printf '  %s!%s %-26s %s\n' "$C_R" "$C_N" "$2" "$3" ;;
+    *) printf '  %s-%s %-26s %s\n' "$C_D" "$C_N" "$2" "$3" ;;
+  esac
+}
+
+svc_chk() { # LABEL UNIT
+  if ! systemctl cat "$2" >/dev/null 2>&1; then chk info "$1" "not installed"
+  elif systemctl is-active --quiet "$2"; then chk ok "$1" "active"
+  else chk warn "$1" "installed but $(systemctl is-active "$2" 2>/dev/null)"; fi
+}
+
+os_name() {
+  local n=""
+  [ -r /etc/os-release ] && n="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -1 | tr -d '"')"
+  echo "${n:-Linux}"
+}
+
+cmd_status() {
+  printf '%s%s %s%s - %s\n\n' "$C_B" "$PROG" "$VERSION" "$C_N" "$(os_name) / kernel $(uname -r)"
+  [ "$(id -u)" -eq 0 ] || warn "not root: some checks are limited (run: sudo $PROG status)"
+  printf '%sProtection layers%s\n' "$C_B" "$C_N"
+  if lsblk -rno TYPE 2>/dev/null | grep -qx crypt; then chk ok "Disk encryption" "LUKS/dm-crypt volume present"
+  else chk warn "Disk encryption" "none detected (protects against laptop theft)"; fi
+  if have mokutil; then
+    mokutil --sb-state 2>/dev/null | grep -qi enabled && chk ok "Secure Boot" "enabled" || chk info "Secure Boot" "disabled (optional)"
+  fi
+  local fw; fw="$(fw_state)"
+  [ "$fw" = none ] && chk warn "Firewall" "none active" || chk ok "Firewall" "$fw"
+  if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]; then chk ok "Mandatory access control" "AppArmor"
+  elif have getenforce && [ "$(getenforce 2>/dev/null)" = Enforcing ]; then chk ok "Mandatory access control" "SELinux enforcing"
+  else chk warn "Mandatory access control" "none"; fi
+  svc_chk "fail2ban" fail2ban
+  svc_chk "auditd" auditd
+  svc_chk "USBGuard" usbguard
+  svc_chk "ClamAV signatures" clamav-freshclam
+  svc_chk "Auto updates" unattended-upgrades
+  if have aide; then
+    aide_setup 2>/dev/null
+    [ -f "$DB_IN" ] && chk ok "AIDE baseline" "present" || chk warn "AIDE baseline" "missing (sudo $PROG aide init)"
+  else chk info "AIDE" "not installed"; fi
+
+  printf '\n%sKernel hardening%s\n' "$C_B" "$C_N"
+  local kv k v cur good=0 tot=0
+  for kv in "${SYSCTLS[@]}"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    [ -e "$(sysctl_path "$k")" ] || continue
+    tot=$((tot + 1))
+    cur="$(sysctl -n "$k" 2>/dev/null)"
+    [ "$cur" = "$v" ] && good=$((good + 1))
+  done
+  [ "$good" -eq "$tot" ] && chk ok "sysctl" "$good/$tot keys hardened" || chk warn "sysctl" "$good/$tot hardened (sudo $PROG harden sysctl)"
+
+  printf '\n%sExposure and hygiene%s\n' "$C_B" "$C_N"
+  local l n; l="$(exposed_listeners)"; n="$(printf '%s' "$l" | grep -c . || true)"
+  if [ "${n:-0}" -eq 0 ]; then chk ok "Network listeners" "none exposed"
+  else chk info "Network listeners" "$n exposed: $(echo "$l" | tr '\n' ' ')"; fi
+  local t s; read -r t s <<<"$(count_updates)"
+  if [ "$t" = "?" ]; then chk info "Pending updates" "unknown"
+  elif [ "$t" -eq 0 ]; then chk ok "Pending updates" "none"
+  else chk warn "Pending updates" "$t ($s security)"; fi
+  [ -f /var/run/reboot-required ] && chk warn "Reboot" "required" || chk ok "Reboot" "not required"
+  local s2
+  for s2 in "${RISKY_SERVICES[@]}"; do
+    systemctl is-active --quiet "$s2" 2>/dev/null && chk warn "Service $s2" "running (see: $PROG services list)"
+  done
+
+  printf '\n%sRecent scheduled/manual runs%s\n' "$C_B" "$C_N"
+  if [ -f "$STATE_DIR/runs.log" ]; then tail -n 6 "$STATE_DIR/runs.log" | awk -F'|' '{printf "  %s  %-10s %-5s %s\n",substr($1,1,16),$2,$3,$4}'
+  else printf '  none yet\n'; fi
+  printf '\n%sScore: %d/%d checks passed%s\n' "$C_B" "$CHK_OK" "$CHK_TOT" "$C_N"
+}
+
+cmd_report() {
+  [ -f "$STATE_DIR/runs.log" ] || { info "no runs recorded yet"; return 0; }
+  info "last 25 runs"
+  tail -n 25 "$STATE_DIR/runs.log" | awk -F'|' '{printf "%s  %-10s %-5s %s\n",substr($1,1,16),$2,$3,$4}'
+  info "logs: $LOG_DIR"
+}
+
+# ----------------------------------------------------------------- scheduler
+SYSD="$ETC/systemd/system"
+TASK_RE='^(scan (audit|rootkit|malware|integrity|updates|ports|all)|status)$'
+
+sched_valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]]; }
+
+sched_add() {
+  local name="${1:-}" task="${2:-}" when="${3:-}"
+  [ -n "$name" ] && [ -n "$task" ] && [ -n "$when" ] ||
+    die "usage: $PROG schedule add <name> \"<task>\" <daily|weekly|monthly|'OnCalendar expr'>"
+  sched_valid_name "$name" || die "name must be lowercase letters, digits, dashes"
+  [[ "$task" =~ $TASK_RE ]] || die "task must be one of: scan audit|rootkit|malware|integrity|updates|ports|all, or status (aide update is manual on purpose)"
+  case "$SELF" in /usr/bin/* | /usr/sbin/* | /usr/local/bin/* | /usr/local/sbin/* | /opt/*) ;; *)
+    die "install first so timers have a stable path: sudo $SELF self-install" ;; esac
+  if have systemd-analyze; then
+    systemd-analyze calendar "$when" >/dev/null 2>&1 || die "invalid schedule '$when' (try: daily, weekly, monthly, 'Mon *-*-* 03:00')"
+  fi
+  [ "$DRY_RUN" -eq 1 ] && { info "would create shieldctl-$name.timer ($task, $when)"; return 0; }
+  mkdir -p "$SYSD"
+  cat >"$SYSD/shieldctl-$name.service" <<EOF
+[Unit]
+Description=shieldctl: $task
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=$SELF $task --quiet
+EOF
+  cat >"$SYSD/shieldctl-$name.timer" <<EOF
+[Unit]
+Description=shieldctl schedule: $name ($task, $when)
+
+[Timer]
+OnCalendar=$when
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+  if [ "$LIVE" -eq 1 ]; then
+    systemctl daemon-reload && systemctl enable --now "shieldctl-$name.timer" >/dev/null 2>&1 &&
+      ok "scheduled '$name': $task ($when)" || die "could not enable timer"
+  else ok "wrote unit files (test mode)"; fi
+}
+
+cmd_schedule() {
+  local sub="${1:-list}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    add) need_root; init_state; sched_add "$@" ;;
+    remove)
+      need_root
+      [ -n "${1:-}" ] && sched_valid_name "$1" || die "usage: $PROG schedule remove <name>"
+      if [ "$LIVE" -eq 1 ]; then run systemctl disable --now "shieldctl-$1.timer" 2>/dev/null; fi
+      [ "$DRY_RUN" -eq 1 ] || rm -f "$SYSD/shieldctl-$1.timer" "$SYSD/shieldctl-$1.service"
+      if [ "$LIVE" -eq 1 ]; then run systemctl daemon-reload; fi
+      ok "removed $1" ;;
+    list) systemctl list-timers --all --no-pager 'shieldctl-*' 2>/dev/null || true ;;
+    run)
+      need_root
+      [ -n "${1:-}" ] && sched_valid_name "$1" || die "usage: $PROG schedule run <name>"
+      run systemctl start "shieldctl-$1.service" ;;
+    defaults)
+      need_root; init_state
+      sched_add updates-daily "scan updates" daily
+      sched_add ports-weekly "scan ports" weekly
+      sched_add malware-weekly "scan malware" weekly
+      sched_add rootkit-weekly "scan rootkit" weekly
+      sched_add integrity-weekly "scan integrity" weekly
+      sched_add audit-monthly "scan audit" monthly ;;
+    *) die "usage: $PROG schedule [list|add|remove|run|defaults]" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------- self
+cmd_self_install() {
+  need_root
+  install -m 755 "$SELF" /usr/local/bin/$PROG && ok "installed /usr/local/bin/$PROG"
+}
+
+cmd_self_uninstall() {
+  need_root
+  local t
+  for t in $(systemctl list-unit-files 'shieldctl-*.timer' --no-legend 2>/dev/null | awk '{print $1}'); do
+    systemctl disable --now "$t" >/dev/null 2>&1
+    rm -f "$SYSD/$t" "$SYSD/${t%.timer}.service"
+  done
+  systemctl daemon-reload 2>/dev/null
+  rm -f /usr/local/bin/$PROG
+  ok "removed schedules and binary. Hardening drop-ins remain until: $PROG rollback"
+}
+
+cmd_menu() {
+  [ "$(id -u)" -eq 0 ] || exec sudo "$SELF"
+  [ -t 0 ] || { usage; return 0; }
+  local PS3="Choose: " o
+  select o in "Status" "Harden (recommended)" "Scan everything" "Scan malware" "AIDE check" "Schedule defaults" "Schedules" "Rollback" "Quit"; do
+    case "$o" in
+      "Status") cmd_status ;;
+      "Harden (recommended)") cmd_harden ;;
+      "Scan everything") cmd_scan all ;;
+      "Scan malware") cmd_scan malware ;;
+      "AIDE check") cmd_scan integrity ;;
+      "Schedule defaults") cmd_schedule defaults ;;
+      "Schedules") cmd_schedule list ;;
+      "Rollback") confirm "Undo shieldctl changes?" && cmd_rollback ;;
+      "Quit") break ;;
+      *) echo "invalid" ;;
+    esac
+    echo
+  done
+}
+
+usage() {
+  cat <<EOF
+$PROG $VERSION - lightweight Linux hardening, audit and scheduling
+
+USAGE: $PROG <command> [options]
+
+  status                         dashboard of all protection layers (read-only)
+  install [--usbguard] [--firewall]
+                                 install lynis rkhunter clamav aide fail2ban auditd
+  harden [module...]             default: sysctl modules coredump perms firewall
+                                 extra:   umask dns usbguard   (or: all)
+  rollback                       undo everything shieldctl changed
+  services [list|disable <n>..]  review/disable risky services (reversible)
+  scan <what>                    audit | rootkit | malware | integrity | updates | ports | all
+  aide <init|check|update|accept> file-integrity baseline (CHECK before UPDATE)
+  schedule <list|add|remove|run|defaults>
+                                 timers, e.g.:  schedule add weekly-av "scan malware" weekly
+  report                         recent results
+  menu                           interactive menu
+  self-install / self-uninstall  copy to /usr/local/bin (needed for schedules)
+
+OPTIONS
+  -n, --dry-run     show what would change, change nothing
+  -y, --yes         assume yes
+  -q, --quiet       only warnings/errors (used by timers)
+      --strict      dns: try mandatory DNS-over-TLS first (auto-falls back)
+      --path DIR    scan malware: directory to scan (repeatable)
+      --bg          aide: run in background via systemd-run
+EOF
+}
+
+# --------------------------------------------------------------------- main
+main() {
+  local pos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n | --dry-run) DRY_RUN=1 ;;
+      -y | --yes) ASSUME_YES=1 ;;
+      -q | --quiet) QUIET=1 ;;
+      --strict) STRICT=1 ;;
+      --bg) BG=1 ;;
+      --no-accept) NO_ACCEPT=1 ;;
+      --path) shift; [ -n "${1:-}" ] || die "--path needs a directory"; SCAN_PATHS+=("$1") ;;
+      -h | --help | help) usage; exit 0 ;;
+      -v | --version | version) echo "$PROG $VERSION"; exit 0 ;;
+      *) pos+=("$1") ;;
+    esac
+    shift
+  done
+  set -- ${pos[@]+"${pos[@]}"}
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    "" | menu) cmd_menu ;;
+    status) cmd_status ;;
+    install) cmd_install "$@" ;;
+    harden) cmd_harden "$@" ;;
+    rollback) cmd_rollback ;;
+    services) cmd_services "$@" ;;
+    scan) cmd_scan "$@" ;;
+    aide) cmd_aide "$@" ;;
+    schedule) cmd_schedule "$@" ;;
+    report) cmd_report ;;
+    self-install) cmd_self_install ;;
+    self-uninstall) cmd_self_uninstall ;;
+    *) err "unknown command '$cmd'"; usage; exit 2 ;;
+  esac
+}
+
+main "$@"
