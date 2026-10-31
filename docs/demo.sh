@@ -46,11 +46,10 @@ printf '\033[2J\033[H'
 printf '%s╔══════════════════════════════════════════════════════════════════════╗%s\n' \
   "$C_BLUE" "$C_RESET"
 printf '%s║ %-68s ║%s\n' "$C_BLUE" "" "$C_RESET"
-printf '%s║ %-68s ║%s\n' "$C_BLUE" "       [ ShieldCTL ]   v1.0.1   •   DEMO" "$C_RESET"
+printf '%s║ %-68s ║%s\n' "$C_BLUE" "                           ShieldCTL" "$C_RESET"
 printf '%s║ %-68s ║%s\n' "$C_BLUE" "" "$C_RESET"
-printf '%s║ %-68s ║%s\n' "$C_BLUE" "       Secure your baseline. Understand every change." "$C_RESET"
+printf '%s║ %-68s ║%s\n' "$C_BLUE" "                             0xmfbk" "$C_RESET"
 printf '%s║ %-68s ║%s\n' "$C_BLUE" "" "$C_RESET"
-printf '%s║ %-68s ║%s\n' "$C_BLUE" "                         by 0xmfbk" "$C_RESET"
 printf '%s╚══════════════════════════════════════════════════════════════════════╝%s\n' \
   "$C_BLUE" "$C_RESET"
 printf '%sThis demo is read-only except for isolated test temporary files.%s\n' \
