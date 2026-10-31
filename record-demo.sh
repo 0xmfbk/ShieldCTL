@@ -48,8 +48,8 @@ title() {
   clear
   printf '\n'
   printf '%b╔%s╗%b\n' "$CYAN" "$border" "$RESET"
-  box_line 'ShieldCTL  Linux security hardening toolkit' "$BOLD"
-  box_line 'Safe product demonstration • read-only and dry-run' "$DIM"
+  box_line 'ShieldCTL' "$BOLD"
+  box_line 'by 0xmfbk  •  Linux security hardening toolkit' "$DIM"
   printf '%b╚%s╝%b\n' "$CYAN" "$border" "$RESET"
   printf '\n'
 }
