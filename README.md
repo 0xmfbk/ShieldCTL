@@ -1,19 +1,37 @@
-# shieldctl
+<div align="center">
 
-![Platform](https://img.shields.io/badge/platform-Linux-111827)
-![Shell](https://img.shields.io/badge/shell-Bash-4EAA25)
-![License](https://img.shields.io/badge/license-MIT-blue)
+# 🛡️ ShieldCTL
 
-<p align="center">
+### Practical Linux hardening, auditing, and integrity monitoring
+
+Secure your baseline. Understand every change. Keep control.
+
+<p>
+  <a href="https://github.com/0xmfbk/ShieldCTL">
+    <img src="https://img.shields.io/badge/platform-Linux-111827?style=for-the-badge" alt="Platform: Linux">
+  </a>
+  <a href="https://www.gnu.org/software/bash/">
+    <img src="https://img.shields.io/badge/shell-Bash-4EAA25?style=for-the-badge" alt="Shell: Bash">
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-2563eb?style=for-the-badge" alt="License: MIT">
+  </a>
+</p>
+
+<p><strong>Built by 0xmfbk</strong> • A transparent, reversible security toolkit for Linux administrators</p>
+
+<p>
   <img src="docs/demo.gif" alt="ShieldCTL terminal demonstration" width="900">
 </p>
 
-**shieldctl** is a single-file Linux hardening, auditing, integrity-monitoring, and
+</div>
+
+ShieldCTL is a single-file Linux hardening, auditing, integrity-monitoring, and
 scheduling utility. It applies conservative security improvements, explains what it
 finds, records task results, and keeps changes easy to review and undo.
 
 It is designed for administrators who want a practical command-line security baseline
-without installing a permanent shieldctl daemon or sending data to an external service.
+without installing a permanent ShieldCTL daemon or sending data to an external service.
 
 > **Important:** shieldctl reduces attack surface and improves visibility. It does not
 > make a system invulnerable. Read the changes, test with `--dry-run`, and keep a
