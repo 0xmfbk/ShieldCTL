@@ -16,7 +16,9 @@ RUN if command -v apt-get >/dev/null 2>&1; then \
 
 COPY shieldctl /opt/shieldctl/shieldctl
 COPY tests/run.sh /opt/shieldctl/tests/run.sh
-RUN chmod 755 /opt/shieldctl/shieldctl /opt/shieldctl/tests/run.sh
+COPY tests/firewall_test.sh /opt/shieldctl/tests/firewall_test.sh
+COPY tests/run_all.sh /opt/shieldctl/tests/run_all.sh
+RUN chmod 755 /opt/shieldctl/shieldctl /opt/shieldctl/tests/*.sh
 
 WORKDIR /workspace
-ENTRYPOINT ["/opt/shieldctl/tests/run.sh"]
+ENTRYPOINT ["/opt/shieldctl/tests/run_all.sh"]
