@@ -37,7 +37,7 @@ assert_contains "$help" "harden [module...]"
 assert_not_contains "$help" "DNS-over-TLS"
 assert_not_contains "$help" --strict
 
-dry_run="$("$TOOL" harden --dry-run)"
+dry_run="$("$TOOL" harden sysctl modules coredump --dry-run)"
 assert_contains "$dry_run" "ShieldCTL"
 assert_contains "$dry_run" "would write"
 test "$(find "$TMP" -type f | wc -l)" -eq 0 || fail "dry-run created files"
