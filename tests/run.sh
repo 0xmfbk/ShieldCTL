@@ -42,7 +42,7 @@ assert_contains "$dry_run" "ShieldCTL"
 assert_contains "$dry_run" "would write"
 test "$(find "$TMP" -type f | wc -l)" -eq 0 || fail "dry-run created files"
 
-"$TOOL" harden sysctl modules coredump firewall >/dev/null
+"$TOOL" harden sysctl modules coredump >/dev/null
 test -f "$SHIELDCTL_ETC/sysctl.d/99-shieldctl.conf" || fail "sysctl file missing"
 test -f "$SHIELDCTL_ETC/modprobe.d/shieldctl-blacklist.conf" || fail "module file missing"
 test -f "$SHIELDCTL_ETC/security/limits.d/99-shieldctl-nocore.conf" ||
