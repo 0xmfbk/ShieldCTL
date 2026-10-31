@@ -3,6 +3,18 @@
 Release assets for the latest version are available on the
 [GitHub releases page](https://github.com/0xmfbk/ShieldCTL/releases).
 
+## Unreleased
+
+### Tests and documentation
+
+- Added dedicated firewall regression coverage for SSH lockout prevention,
+  explicit approvals, interface-scoped listeners, non-interactive runs,
+  dry-run isolation, invalid ports, and empty arrays.
+- Improved the manual demo flow with a polished title banner, shorter default
+  pauses, full-speed mode through `DEMO_PAUSE=0`, and non-interactive sudo
+  handling that skips unavailable root-only steps instead of hanging.
+- Documented the complete local test command and the firewall regression scope.
+
 ## [1.0.1] - 2026-10-31
 
 ### Security

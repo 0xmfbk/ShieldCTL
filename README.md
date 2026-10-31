@@ -520,6 +520,18 @@ Test read-only behavior first:
 ./shieldctl schedule list
 ```
 
+Run the complete local validation suite from the repository root:
+
+```bash
+tests/run_all.sh
+```
+
+The suite includes Bash syntax checks, ShellCheck, isolated hardening and
+rollback checks, and dedicated firewall regression coverage. The firewall
+tests verify SSH-session preservation, explicit port approvals, interface-scoped
+rules, safe non-interactive behavior, dry-run isolation, invalid-port rejection,
+and empty-array handling under `set -u`.
+
 ### Container test harness
 
 The repository includes a safe container harness for CLI, syntax, ShellCheck,
@@ -574,8 +586,11 @@ agg --font-family "DejaVu Sans Mono" --font-size 18 \
 The script does not apply hardening changes. It only runs read-only commands,
 dry-runs, isolated temporary-file tests, and prints the optional container
 commands for the final Debian/Fedora check. It uses `sudo` only for the
-read-only/dry-run commands that require root. `DEMO_PAUSE=0` runs it at full
-speed; the default pause is short so the demo does not appear stalled.
+read-only/dry-run commands that require root. If non-interactive sudo is not
+already authorized, root-only steps are skipped rather than prompting and
+hanging the recording. Run `sudo -v` before recording to enable them.
+`DEMO_PAUSE=0` runs at full speed; the default pause is short so the demo does
+not appear stalled.
 
 ## Contributing
 
