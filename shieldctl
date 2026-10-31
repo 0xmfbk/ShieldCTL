@@ -70,11 +70,11 @@ confirm() {
   [ "$ASSUME_YES" -eq 1 ] && return 0
   local a input="/dev/stdin"
   if [ ! -t 0 ]; then
-    [ -r /dev/tty ] && [ -w /dev/tty ] || {
+    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
       CONFIRM_UNAVAILABLE=1
       warn "interactive confirmation required; use --yes only after reviewing the requested changes"
       return 2
-    }
+    fi
     input="/dev/tty"
   fi
   while :; do
@@ -502,8 +502,11 @@ cmd_harden() {
   info "Every step below reports its intended effect and result."
   if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ] && have timeshift; then
     if confirm "Create a Timeshift snapshot first?"; then
-      timeshift --create --comments "shieldctl pre-harden" &&
-        ok "snapshot created" || warn "snapshot creation failed; continuing without snapshot"
+      if timeshift --create --comments "shieldctl pre-harden"; then
+        ok "snapshot created"
+      else
+        warn "snapshot creation failed; continuing without snapshot"
+      fi
     else
       info "snapshot not created"
     fi
@@ -1244,8 +1247,12 @@ main() {
         shift
         [[ "${1:-}" =~ ^([0-9]{1,5})/(tcp|udp)$ ]] ||
           die "--allow-port must be PORT/tcp or PORT/udp"
-        [ "${BASH_REMATCH[1]}" -ge 1 ] && [ "${BASH_REMATCH[1]}" -le 65535 ] ||
+        if ! {
+          [ "${BASH_REMATCH[1]}" -ge 1 ] &&
+            [ "${BASH_REMATCH[1]}" -le 65535 ]
+        }; then
           die "--allow-port port must be between 1 and 65535"
+        fi
         ALLOW_PORTS+=("$1") ;;
       -q | --quiet) QUIET=1 ;;
       --bg) BG=1 ;;
