@@ -27,18 +27,30 @@ readonly BLUE='\033[1;34m'
 readonly GREEN='\033[1;32m'
 readonly YELLOW='\033[1;33m'
 readonly RED='\033[1;31m'
+readonly BOX_WIDTH=99
+
+box_line() {
+  local text="$1" style="$2" left right
+  left=$(( (BOX_WIDTH - ${#text}) / 2 ))
+  right=$(( BOX_WIDTH - ${#text} - left ))
+  printf '%b║%*s%b%s%b%*s║%b\n' \
+    "$CYAN" "$left" '' "$style" "$text" "$RESET" "$right" '' "$RESET"
+}
 
 rule() {
   printf '%b\n' "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 }
 
 title() {
+  local border
+  printf -v border '%*s' "$BOX_WIDTH" ''
+  border=${border// /═}
   clear
   printf '\n'
-  printf '%b\n' "${CYAN}╔════════════════════════════════════════════════════════════╗${RESET}"
-  printf '%b\n' "${CYAN}║${RESET}  ${BOLD}ShieldCTL${RESET}  ${DIM}Linux security hardening toolkit${RESET}       ${CYAN}║${RESET}"
-  printf '%b\n' "${CYAN}║${RESET}  ${DIM}Safe product demonstration • read-only and dry-run${RESET} ${CYAN}║${RESET}"
-  printf '%b\n' "${CYAN}╚════════════════════════════════════════════════════════════╝${RESET}"
+  printf '%b╔%s╗%b\n' "$CYAN" "$border" "$RESET"
+  box_line 'ShieldCTL  Linux security hardening toolkit' "$BOLD"
+  box_line 'Safe product demonstration • read-only and dry-run' "$DIM"
+  printf '%b╚%s╝%b\n' "$CYAN" "$border" "$RESET"
   printf '\n'
 }
 
