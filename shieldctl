@@ -399,8 +399,12 @@ h_firewall() {
         continue
       fi
       warn "  - $proto port $port on $address${iface:+ (interface $iface)}"
-      if [ "$DRY_RUN" -eq 1 ] || [ "$LIVE" -eq 0 ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
         info "dry-run: would ask whether to allow incoming $proto/$port${iface:+ on $iface}"
+        continue
+      fi
+      if [ "$LIVE" -eq 0 ]; then
+        info "test mode: keeping $proto/$port${iface:+ on $iface} closed (no prompt)"
         continue
       fi
       if [ "$ASSUME_YES" -eq 1 ]; then
@@ -1224,6 +1228,8 @@ OPTIONS
 -q, --quiet       only warnings/errors (used by timers)
       --path DIR    scan malware: directory to scan (repeatable)
       --bg          aide: run in background via systemd-run
+      --rebuild-confirmed
+                    internal: authorize a confirmed background AIDE rebuild
 EOF
 }
 

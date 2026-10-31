@@ -229,24 +229,31 @@ Hardening is intentionally verbose. Each module prints:
 - A final count of requested, completed, and skipped/failed steps
 
 Before enabling a firewall, shieldctl lists exposed TCP and UDP listeners,
-including their address, protocol, port, and interface scope. It keeps listeners
-closed unless they are explicitly approved:
+including their address, protocol, port, and interface scope. Incoming traffic is
+closed by default. A listener is opened only by the current SSH-session
+protection, a repeatable `--allow-port` option, or an explicit interactive
+approval:
 
 ```text
 Allow incoming tcp/8080 from anywhere? [Y/N]
 Allow incoming udp/51820 on wg0 from anywhere? [Y/N]
 ```
 
-Answer `Y` only when the service should be reachable; `N` (or an invalid
-non-interactive decision) keeps it closed. Duplicate listeners are deduplicated
-by protocol, port, and interface. Interface-scoped listeners use interface
-rules, while DHCP client listeners on link-local or loopback-like interfaces are
-not offered because replies are covered by conntrack.
+Answer `Y` only when the service should be reachable; `N` keeps it closed.
+`--yes`, non-interactive runs, dry-run, and test mode never open discovered
+listeners beyond the explicit rules described below. Duplicate listeners are
+deduplicated by protocol, port, and interface. Interface-scoped listeners use
+interface rules, while DHCP client listeners on link-local or loopback-like
+interfaces are not offered because replies are covered by conntrack.
+
+#### Remote/SSH safety
 
 The server port of the current SSH session is always allowed automatically and
-is never removed or overridden. Other SSH listeners are never opened by
+is never removed or overridden. The session is detected from `SSH_CONNECTION`,
+with `SSH_CLIENT` as a fallback. Other SSH listeners are never opened by
 `--yes` or a non-interactive run. If an SSH daemon listener is not approved,
-the firewall step aborts safely and tells you to use `--allow-port`:
+the firewall step aborts before enabling the firewall and tells you to use
+`--allow-port`:
 
 ```bash
 sudo shieldctl harden firewall --allow-port 22/tcp
