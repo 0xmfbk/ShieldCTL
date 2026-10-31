@@ -124,9 +124,14 @@ test_allow_port_ssh() {
 }
 
 test_interface_scope() {
-  local name="interface-scoped listener keeps interface scope" old_path
+  local name="interface-scoped listener keeps interface scope" old_path script_bin
   setup_case interface
   export FAKE_SS_MODE=interface
+  script_bin="$(command -v script || true)"
+  if [ -z "$script_bin" ]; then
+    fail "$name" "script command is required for the interactive test"
+    return
+  fi
   old_path="$PATH"
   for command in bash readlink mkdir chmod awk sort grep cat sed; do
     ln -s "$(command -v "$command")" "$CASE_DIR/bin/$command"
@@ -137,7 +142,7 @@ test_interface_scope() {
 exec "$TOOL" harden firewall
 EOF
   chmod 755 "$CASE_DIR/run.sh"
-  if ! printf 'Y\nY\n' | /usr/bin/script -qec "bash '$CASE_DIR/run.sh'" /dev/null >"$CASE_DIR/pty.out" 2>&1; then
+  if ! printf 'Y\nY\n' | "$script_bin" -qec "bash '$CASE_DIR/run.sh'" /dev/null >"$CASE_DIR/pty.out" 2>&1; then
     local output
     output="$(cat "$CASE_DIR/pty.out" 2>/dev/null || true)"
     export PATH="$old_path"
