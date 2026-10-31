@@ -16,7 +16,7 @@ readonly C_DIM=$'\033[2m'
 readonly C_RESET=$'\033[0m'
 
 pause() {
-  sleep "${DEMO_PAUSE:-1}"
+  sleep "${DEMO_PAUSE:-0.15}"
 }
 
 section() {
@@ -37,8 +37,11 @@ run_step() {
 root_step() {
   if [ "$(id -u)" -eq 0 ]; then
     run_step "$@"
-  else
+  elif sudo -n true 2>/dev/null; then
     run_step sudo "$@"
+  else
+    printf '%s! Skipping root-only step; run `sudo -v` before recording.%s\n' \
+      "$C_DIM" "$C_RESET"
   fi
 }
 

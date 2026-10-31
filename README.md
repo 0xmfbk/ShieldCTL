@@ -559,7 +559,8 @@ harness:
 
 ```bash
 chmod +x docs/demo.sh
-DEMO_PAUSE=1 asciinema rec -c ./docs/demo.sh docs/shieldctl-v1.0.1.cast
+sudo -v
+DEMO_PAUSE=0.25 asciinema rec -c ./docs/demo.sh docs/shieldctl-v1.0.1.cast
 ```
 
 Stop with `Ctrl+D`. Convert the recording to a GIF with
@@ -573,7 +574,8 @@ agg --font-family "DejaVu Sans Mono" --font-size 18 \
 The script does not apply hardening changes. It only runs read-only commands,
 dry-runs, isolated temporary-file tests, and prints the optional container
 commands for the final Debian/Fedora check. It uses `sudo` only for the
-read-only/dry-run commands that require root.
+read-only/dry-run commands that require root. `DEMO_PAUSE=0` runs it at full
+speed; the default pause is short so the demo does not appear stalled.
 
 ## Contributing
 
