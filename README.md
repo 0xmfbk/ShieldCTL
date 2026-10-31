@@ -66,80 +66,90 @@ Most checks degrade gracefully when optional tools are unavailable. The stronges
 integration is expected on Debian-family systems; Fedora, Arch, and openSUSE use
 best-effort package and service mappings.
 
-## Docker test prerequisites
+## Container test prerequisites
 
-Docker is **not installed automatically by shieldctl**. Installing a system
-container runtime requires administrator approval and distribution-specific
-repository configuration. Install Docker only if you want to run the optional
-container test harness.
+The test harness is optional and is never installed or started by ShieldCTL.
+Use these options in order:
 
-Check whether Docker and Compose are already available:
+1. **Rootless Podman** with `podman compose` or `podman-compose` (recommended).
+2. **Rootless Docker** with Docker Compose.
+3. A **disposable virtual machine** with a snapshot if rootless containers are
+   unavailable.
+
+The repository's [`compose.yaml`](./compose.yaml) uses portable Compose features
+supported by both Podman and Docker: read-only filesystems and mounts,
+`cap_drop: ALL`, `no-new-privileges`, and temporary `/tmp` and `/run`
+filesystems. It does not require a Docker socket, host mounts, privileged mode,
+host networking, or host PID access.
+
+> **Warning:** membership in the `docker` group is effectively root access on
+> the host because it grants control of the Docker daemon. Do not use
+> `sudo usermod -aG docker "$USER"` as a convenience. Prefer rootless Podman or
+> rootless Docker instead.
+
+### Rootless Podman
+
+Check the installation:
 
 ```bash
-docker --version
-docker compose version
+podman --version
+podman compose version || podman-compose --version
 ```
 
-If either command is missing, install Docker using your distribution's official
-packages or documentation.
-
-### Debian, Ubuntu, and Pop!_OS
+Install the packages using your distribution's official repositories:
 
 ```bash
+# Debian, Ubuntu, or Pop!_OS
 sudo apt-get update
-sudo apt-get install -y docker.io docker-compose
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"
+sudo apt-get install -y podman podman-compose
+
+# Fedora
+sudo dnf install -y podman podman-compose
+
+# Arch Linux
+sudo pacman -S --needed podman podman-compose
+
+# openSUSE
+sudo zypper install podman podman-compose
 ```
 
-Apply the group change by logging out and back in, or run:
+Run the harness without `sudo`:
 
 ```bash
-newgrp docker
+podman compose build
+podman compose run --rm debian
+podman compose run --rm fedora
 ```
 
-### Fedora
+If the Compose subcommand is unavailable, replace `podman compose` with
+`podman-compose`.
 
-```bash
-sudo dnf install -y docker docker-compose-plugin
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"
-newgrp docker
-```
+### Rootless Docker
 
-### Arch Linux
-
-```bash
-sudo pacman -S --needed docker docker-compose
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"
-newgrp docker
-```
-
-### openSUSE
-
-```bash
-sudo zypper install docker docker-compose
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"
-newgrp docker
-```
-
-Verify the installation before running the project tests:
+Follow Docker's official rootless-install documentation, then verify:
 
 ```bash
 docker --version
 docker compose version
-docker run --rm hello-world
+docker info --format '{{.SecurityOptions}}' | grep -q rootless
 ```
 
-If `docker compose version` is unavailable but `docker-compose --version`
-works, use `docker-compose` in the commands below. Debian 13 commonly provides
-the standalone `docker-compose` command from its default repositories.
-Alternatively, install Docker's official Compose plugin.
+Run the harness without `sudo`:
 
-Do not run the test harness with `sudo` unless your Docker installation
-specifically requires it.
+```bash
+docker compose build
+docker compose run --rm debian
+docker compose run --rm fedora
+```
+
+Do not add your user to the `docker` group merely to avoid `sudo`; use the
+rootless Docker daemon instead.
+
+### Disposable VM fallback
+
+If rootless Podman or Docker is unavailable, run the harness inside a disposable
+VM with a snapshot. Do not weaken the Compose security settings or add
+`privileged: true` to make the harness work.
 
 ## Installation
 
@@ -490,17 +500,17 @@ The repository includes a safe container harness for CLI, syntax, ShellCheck,
 dry-run, isolated hardening-file, rollback, and distro-package checks:
 
 ```bash
-docker compose build
-docker compose run --rm debian
-docker compose run --rm fedora
+podman compose build
+podman compose run --rm debian
+podman compose run --rm fedora
 ```
 
-With standalone Compose:
+With standalone `podman-compose`:
 
 ```bash
-docker-compose build
-docker-compose run --rm debian
-docker-compose run --rm fedora
+podman-compose build
+podman-compose run --rm debian
+podman-compose run --rm fedora
 ```
 
 The services use a read-only project mount, a read-only container filesystem,
