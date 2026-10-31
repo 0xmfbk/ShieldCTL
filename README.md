@@ -333,6 +333,15 @@ sudo shieldctl aide init --bg
 journalctl -fu shieldctl-aide-init
 ```
 
+If an AIDE baseline already exists, `aide init --bg` asks for confirmation
+before starting the rebuild. `aide update --bg` always keeps the generated
+database for review and never accepts it automatically:
+
+```bash
+sudo shieldctl aide update --bg
+sudo shieldctl aide accept
+```
+
 ### Services
 
 ```bash

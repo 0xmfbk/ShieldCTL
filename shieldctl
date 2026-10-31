@@ -29,6 +29,7 @@ ASSUME_YES=0
 QUIET=0
 BG=0
 NO_ACCEPT=0
+REBUILD_CONFIRMED=0
 CONFIRM_UNAVAILABLE=0
 SCAN_PATHS=()
 ALLOW_PORTS=()
@@ -708,7 +709,10 @@ aide_hash_save() {
 aide_init() {
   aide_excludes
   aide -c "$AIDE_CONF" --config-check >/dev/null 2>&1 || die "AIDE config check failed: aide -c $AIDE_CONF --config-check"
-  if [ -f "$DB_IN" ] && ! confirm "A baseline already exists. Rebuild it from the CURRENT state?"; then return 0; fi
+  if [ -f "$DB_IN" ] && [ "$REBUILD_CONFIRMED" -eq 0 ] &&
+    ! confirm "A baseline already exists. Rebuild it from the CURRENT state?"; then
+    return 0
+  fi
   info "building baseline (10-25 minutes; low priority)"
   task_log aide-init
   aide -c "$AIDE_CONF" --init >"$TASK_LOG" 2>&1
@@ -748,11 +752,19 @@ cmd_aide() {
   local sub="${1:-}"
   need_root; init_state; aide_setup
   if [ "$BG" -eq 1 ] && [ -n "$sub" ]; then
-    local extra=""
-    [ "$sub" = update ] && extra="--no-accept"
-    # shellcheck disable=SC2086
+    local bg_args=("$SELF" aide "$sub")
+    if [ "$sub" = init ]; then
+      if [ -f "$DB_IN" ] && [ "$ASSUME_YES" -eq 0 ] &&
+        ! confirm "A baseline already exists. Rebuild it in the background?"; then
+        info "background AIDE init cancelled; existing baseline was preserved"
+        return 0
+      fi
+      bg_args+=(--rebuild-confirmed)
+    elif [ "$sub" = update ]; then
+      bg_args+=(--no-accept)
+    fi
     systemd-run --unit="shieldctl-aide-$sub" --property=Nice=19 --property=IOSchedulingClass=idle \
-      "$SELF" aide "$sub" --yes $extra || die "systemd-run failed"
+      "${bg_args[@]}" || die "systemd-run failed"
     info "running in background. Follow: journalctl -fu shieldctl-aide-$sub"
     return 0
   fi
@@ -1202,6 +1214,7 @@ main() {
       -q | --quiet) QUIET=1 ;;
       --bg) BG=1 ;;
       --no-accept) NO_ACCEPT=1 ;;
+      --rebuild-confirmed) REBUILD_CONFIRMED=1 ;;
       --path) shift; [ -n "${1:-}" ] || die "--path needs a directory"; SCAN_PATHS+=("$1") ;;
       -h | --help | help) banner; usage; exit 0 ;;
       -v | --version | version) banner; echo "$PROG $VERSION"; exit 0 ;;
