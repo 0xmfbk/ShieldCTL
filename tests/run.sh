@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${ROOT:-/opt/shieldctl}"
+ROOT="${ROOT:-$(cd -- "$(dirname -- "$0")/.." && pwd)}"
 TOOL="$ROOT/shieldctl"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

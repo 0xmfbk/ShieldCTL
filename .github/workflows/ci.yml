@@ -22,7 +22,7 @@ jobs:
         run: bash -n shieldctl tests/firewall_test.sh tests/run_all.sh tests/run.sh
 
       - name: Run local test suite
-        run: tests/run_all.sh
+        run: sudo tests/run_all.sh
 
   containers:
     name: Container harness (${{ matrix.distribution }})
