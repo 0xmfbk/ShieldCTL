@@ -9,6 +9,12 @@
 #   * risky actions (USBGuard, services) are opt-in and self-verifying
 set -uo pipefail
 
+if (( BASH_VERSINFO[0] < 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  printf 'shieldctl requires Bash 4.4 or newer (found %s)\n' "$BASH_VERSION" >&2
+  exit 1
+fi
+
 readonly VERSION="1.0.0"
 readonly PROG="shieldctl"
 ETC="${SHIELDCTL_ETC:-/etc}"
@@ -333,12 +339,14 @@ h_firewall() {
   add_allow() {
     local allow_proto="$1" allow_port="$2" allow_iface="${3:-}" allow_key
     allow_key="$allow_proto|$allow_port|$allow_iface"
-    for key in "${seen_allow[@]}"; do [ "$key" = "$allow_key" ] && return 0; done
+    for key in ${seen_allow[@]+"${seen_allow[@]}"}; do
+      [ "$key" = "$allow_key" ] && return 0
+    done
     seen_allow+=("$allow_key")
     allow_specs+=("$allow_key")
   }
 
-  for spec in "${ALLOW_PORTS[@]}"; do
+  for spec in ${ALLOW_PORTS[@]+"${ALLOW_PORTS[@]}"}; do
     port="${spec%%/*}"; proto="${spec##*/}"
     add_allow "$proto" "$port"
     info "Requested allow: $proto/$port from anywhere"
@@ -363,7 +371,7 @@ h_firewall() {
   while IFS= read -r ssh_port; do
     [ -n "$ssh_port" ] || continue
     sshd_uncovered=1
-    for key in "${seen_allow[@]}"; do
+    for key in ${seen_allow[@]+"${seen_allow[@]}"}; do
       IFS='|' read -r proto port iface <<<"$key"
       if [ "$proto" = tcp ] && [ "$port" = "$ssh_port" ]; then sshd_uncovered=0; break; fi
     done
@@ -383,8 +391,8 @@ h_firewall() {
         continue
       fi
       listener_key="$proto|$port|$iface"
-      if printf '%s\n' "${seen_allow[@]}" | grep -qxF "$proto|$port|" ||
-        printf '%s\n' "${seen_allow[@]}" | grep -qxF "$listener_key"; then
+      if printf '%s\n' ${seen_allow[@]+"${seen_allow[@]}"} | grep -qxF "$proto|$port|" ||
+        printf '%s\n' ${seen_allow[@]+"${seen_allow[@]}"} | grep -qxF "$listener_key"; then
         info "Allowed: $proto/$port${iface:+ on $iface}"
         continue
       fi
@@ -419,7 +427,7 @@ h_firewall() {
     fi
     "$@"
   }
-  for spec in "${allow_specs[@]}"; do
+  for spec in ${allow_specs[@]+"${allow_specs[@]}"}; do
     IFS='|' read -r proto port iface <<<"$spec"
     if [ "$backend" = ufw ]; then
       if [ -n "$iface" ]; then fw_run ufw allow in on "$iface" to any port "$port" proto "$proto"
@@ -849,7 +857,7 @@ t_malware() {
   have clamscan || { finish malware SKIP "clamav not installed (sudo $PROG install)"; return 1; }
   # shellcheck disable=SC2144
   ls /var/lib/clamav/*.c[lv]d >/dev/null 2>&1 || { finish malware FAIL "no ClamAV signatures yet (sudo freshclam)"; return 1; }
-  local dirs=("${SCAN_PATHS[@]}") u h d valid=()
+  local dirs=("${SCAN_PATHS[@]+"${SCAN_PATHS[@]}"}") u h d valid=()
   if [ ${#dirs[@]} -eq 0 ]; then
     u="$(target_user)"
     if [ -n "$u" ]; then h="$(getent passwd "$u" | cut -d: -f6)"; dirs=("$h/Downloads"); fi

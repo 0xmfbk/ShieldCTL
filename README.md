@@ -53,7 +53,7 @@ without installing a permanent ShieldCTL daemon or sending data to an external s
 
 ## Requirements
 
-- Linux with Bash 4+
+- Linux with Bash 4.4+
 - `systemd` is recommended for service checks, scheduling, and background AIDE jobs
 - Root access for hardening, installation, scans, rollback, and schedules
 - One supported package manager for installation:
