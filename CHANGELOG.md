@@ -1,5 +1,8 @@
 # Changelog
 
+Release assets for the latest version are available on the
+[GitHub releases page](https://github.com/0xmfbk/ShieldCTL/releases).
+
 ## [1.0.1] - 2026-10-31
 
 ### Security

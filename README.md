@@ -33,7 +33,7 @@ finds, records task results, and keeps changes easy to review and undo.
 It is designed for administrators who want a practical command-line security baseline
 without installing a permanent ShieldCTL daemon or sending data to an external service.
 
-**Current release: [v1.0.1](https://github.com/0xmfbk/ShieldCTL/releases/tag/v1.0.1)**
+**Latest stable release: [v1.0.1](https://github.com/0xmfbk/ShieldCTL/releases/tag/v1.0.1)**
 
 > **Important:** shieldctl reduces attack surface and improves visibility. It does not
 > make a system invulnerable. Read the changes, test with `--dry-run`, and keep a
@@ -559,10 +559,22 @@ README whenever commands, files, supported systems, or safety behavior change.
 
 ## Releases
 
-The first stable release is `v1.0.1`. Push a matching `v1.0.1` tag to run the
-release workflow, which publishes `shieldctl` and its `SHA256SUMS` file. The
-continuous-integration workflow runs ShellCheck, Bash syntax checks, the local
-test suite, and both Debian and Fedora container harnesses on every push and pull
+The first stable release was `v1.0.0`. The current stable release is `v1.0.1`,
+which includes the firewall lockout fix, Bash 4.4 compatibility, safer AIDE
+background initialization, accurate automatic-update reporting, and portable
+Debian/Fedora CI coverage. See [CHANGELOG.md](./CHANGELOG.md) for the complete
+release history.
+
+Maintainers publish a release by pushing the matching tag:
+
+```bash
+git tag -a v1.0.1 -m "Release v1.0.1"
+git push origin v1.0.1
+```
+
+The release workflow publishes the standalone `shieldctl` script and
+`SHA256SUMS`. The CI workflow runs ShellCheck, Bash syntax checks, the local test
+suite, and both Debian and Fedora container harnesses on every push and pull
 request.
 
 ## License
