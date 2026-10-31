@@ -551,6 +551,30 @@ boot behavior, or physical/network recovery. Validate those in disposable VMs
 with snapshots. Never add `privileged: true`, `network_mode: host`, `pid: host`,
 or host `/etc` and `/var` mounts to this test harness.
 
+### Manual demo recording
+
+Use the included presentation script for a clean, repeatable recording of the
+version, status, dry-run safety, firewall regression tests, and local test
+harness:
+
+```bash
+chmod +x docs/demo.sh
+DEMO_PAUSE=1 asciinema rec -c ./docs/demo.sh docs/shieldctl-v1.0.1.cast
+```
+
+Stop with `Ctrl+D`. Convert the recording to a GIF with
+[agg](https://github.com/asciinema/agg):
+
+```bash
+agg --font-family "DejaVu Sans Mono" --font-size 18 \
+  docs/shieldctl-v1.0.1.cast docs/demo.gif
+```
+
+The script does not apply hardening changes. It only runs read-only commands,
+dry-runs, isolated temporary-file tests, and prints the optional container
+commands for the final Debian/Fedora check. It uses `sudo` only for the
+read-only/dry-run commands that require root.
+
 ## Contributing
 
 Keep changes focused and conservative. Preserve the dry-run path, avoid destructive
