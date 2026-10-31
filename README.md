@@ -33,6 +33,8 @@ finds, records task results, and keeps changes easy to review and undo.
 It is designed for administrators who want a practical command-line security baseline
 without installing a permanent ShieldCTL daemon or sending data to an external service.
 
+**Current release: [v1.0.1](https://github.com/0xmfbk/ShieldCTL/releases/tag/v1.0.1)**
+
 > **Important:** shieldctl reduces attack surface and improves visibility. It does not
 > make a system invulnerable. Read the changes, test with `--dry-run`, and keep a
 > recovery path before applying hardening to a production machine.
@@ -179,6 +181,23 @@ distribution's update policy:
 ```bash
 sudo shieldctl install --auto-apply-updates
 ```
+
+### Verify a release before installation
+
+Release assets include the standalone script and `SHA256SUMS`. Download both from
+the same release, verify the checksum, and only then run `self-install`:
+
+```bash
+VERSION=1.0.1
+curl -fLO "https://github.com/0xmfbk/ShieldCTL/releases/download/v${VERSION}/shieldctl"
+curl -fLO "https://github.com/0xmfbk/ShieldCTL/releases/download/v${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
+chmod +x shieldctl
+sudo ./shieldctl self-install
+```
+
+Do not run an unverified script. If checksum verification fails, delete the
+download and retrieve both assets again from the official release page.
 
 ## Safe first run
 
@@ -529,6 +548,14 @@ or host `/etc` and `/var` mounts to this test harness.
 Keep changes focused and conservative. Preserve the dry-run path, avoid destructive
 defaults, quote shell expansions, return meaningful exit codes, and update this
 README whenever commands, files, supported systems, or safety behavior change.
+
+## Releases
+
+The first stable release is `v1.0.1`. Push a matching `v1.0.1` tag to run the
+release workflow, which publishes `shieldctl` and its `SHA256SUMS` file. The
+continuous-integration workflow runs ShellCheck, Bash syntax checks, the local
+test suite, and both Debian and Fedora container harnesses on every push and pull
+request.
 
 ## License
 

@@ -15,7 +15,7 @@ if (( BASH_VERSINFO[0] < 4 ||
   exit 1
 fi
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.0.1"
 readonly PROG="shieldctl"
 ETC="${SHIELDCTL_ETC:-/etc}"
 STATE_DIR="${SHIELDCTL_STATE:-/var/lib/shieldctl}"

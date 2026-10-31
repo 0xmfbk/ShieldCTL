@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Shell checks and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        run: shellcheck -S warning shieldctl tests/firewall_test.sh tests/run_all.sh tests/run.sh
+
+      - name: Check Bash syntax
+        run: bash -n shieldctl tests/firewall_test.sh tests/run_all.sh tests/run.sh
+
+      - name: Run local test suite
+        run: tests/run_all.sh
+
+  containers:
+    name: Container harness (${{ matrix.distribution }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: [debian, fedora]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run ${{ matrix.distribution }} harness
+        run: docker compose run --rm ${{ matrix.distribution }}

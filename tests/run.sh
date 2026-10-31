@@ -30,7 +30,7 @@ shellcheck "$TOOL"
 
 version="$("$TOOL" --version)"
 assert_contains "$version" "ShieldCTL"
-assert_contains "$version" "shieldctl 1.0.0"
+assert_contains "$version" "shieldctl 1.0.1"
 
 help="$("$TOOL" --help)"
 assert_contains "$help" "harden [module...]"
