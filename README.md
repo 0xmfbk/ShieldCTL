@@ -540,7 +540,8 @@ podman-compose run --rm fedora
 ```
 
 The services use a read-only project mount, a read-only container filesystem,
-temporary `/tmp` and `/run`, dropped Linux capabilities, and
+temporary `/tmp` and `/run` (with execution enabled only for the test harness),
+dropped Linux capabilities, and
 `no-new-privileges`. They never mount the host `/etc`, `/var`, Docker socket,
 host PID namespace, or host network.
 

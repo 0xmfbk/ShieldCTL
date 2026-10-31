@@ -11,7 +11,7 @@ services:
     cap_drop:
       - ALL
     tmpfs:
-      - /tmp
+      - /tmp:rw,exec,nosuid,nodev
       - /run
     volumes:
       - .:/workspace:ro
@@ -28,7 +28,7 @@ services:
     cap_drop:
       - ALL
     tmpfs:
-      - /tmp
+      - /tmp:rw,exec,nosuid,nodev
       - /run
     volumes:
       - .:/workspace:ro
