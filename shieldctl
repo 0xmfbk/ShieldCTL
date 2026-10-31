@@ -30,6 +30,7 @@ QUIET=0
 BG=0
 NO_ACCEPT=0
 REBUILD_CONFIRMED=0
+AUTO_APPLY_UPDATES=0
 CONFIRM_UNAVAILABLE=0
 SCAN_PATHS=()
 ALLOW_PORTS=()
@@ -613,6 +614,7 @@ cmd_install() {
     case "$a" in
       --usbguard) want+=(usbguard) ;;
       --firewall) want+=(firewall) ;;
+      --auto-apply-updates) AUTO_APPLY_UPDATES=1 ;;
       *) die "unknown option $a" ;;
     esac
   done
@@ -638,11 +640,13 @@ cmd_install() {
   if have fail2ban-client; then
     run systemctl enable --now fail2ban >/dev/null 2>&1 || true
   fi
-  if [ "$DRY_RUN" -eq 0 ] && have systemctl; then
+  if [ "$DRY_RUN" -eq 0 ] && have systemctl && [ "$AUTO_APPLY_UPDATES" -eq 1 ]; then
     case "$PM" in
       apt-get) run systemctl enable --now apt-daily-upgrade.timer >/dev/null 2>&1 || true ;;
-      dnf) run systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 || true ;;
+      dnf) run systemctl enable --now dnf-automatic-install.timer >/dev/null 2>&1 || true ;;
     esac
+  elif [ "$AUTO_APPLY_UPDATES" -eq 0 ]; then
+    info "automatic update application not enabled; use --auto-apply-updates to opt in"
   fi
   if [ ${#failed[@]} -eq 0 ]; then
     ok "all tools installed"
@@ -975,16 +979,40 @@ cmd_status() {
   svc_chk "auditd" auditd
   svc_chk "USBGuard" usbguard
   svc_chk "ClamAV signatures" clamav-freshclam
-  if systemctl is-active --quiet apt-daily-upgrade.timer 2>/dev/null ||
-    systemctl is-active --quiet dnf-automatic.timer 2>/dev/null ||
-    systemctl is-active --quiet packagekit.service 2>/dev/null; then
-    chk ok "Auto updates" "scheduled"
-  elif systemctl cat unattended-upgrades.service >/dev/null 2>&1 ||
-    systemctl cat dnf-automatic.timer >/dev/null 2>&1; then
-    chk warn "Auto updates" "installed but not scheduled"
-  else
-    chk info "Auto updates" "not installed"
-  fi
+  detect_pm 2>/dev/null || true
+  local auto_missing=()
+  case "$PM" in
+    apt-get)
+      dpkg-query -W -f='${db:Status-Abbrev}' unattended-upgrades 2>/dev/null |
+        grep -q '^ii ' || auto_missing+=("unattended-upgrades not installed")
+      systemctl is-active --quiet apt-daily-upgrade.timer 2>/dev/null ||
+        auto_missing+=("apt-daily-upgrade.timer inactive")
+      if ! apt-config dump 2>/dev/null |
+        grep -Eq '^APT::Periodic::Unattended-Upgrade[[:space:]]+"?([1-9][0-9]*|true|True|TRUE)"?;'; then
+        auto_missing+=("APT::Periodic::Unattended-Upgrade is zero or unset")
+      fi
+      if [ ${#auto_missing[@]} -eq 0 ]; then
+        chk ok "Auto updates" "unattended-upgrades scheduled and enabled"
+      else
+        chk warn "Auto updates" "${auto_missing[*]}"
+      fi
+      ;;
+    dnf)
+      if systemctl is-active --quiet dnf-automatic-install.timer 2>/dev/null; then
+        chk ok "Auto updates" "dnf-automatic applies updates"
+      elif systemctl is-active --quiet dnf-automatic.timer 2>/dev/null; then
+        chk warn "Auto updates" "downloads only, does not install"
+      elif systemctl cat dnf-automatic-install.timer >/dev/null 2>&1 ||
+        systemctl cat dnf-automatic.timer >/dev/null 2>&1; then
+        chk warn "Auto updates" "installed but no automatic update timer is active"
+      else
+        chk warn "Auto updates" "dnf-automatic not installed"
+      fi
+      ;;
+    *)
+      chk warn "Auto updates" "unknown"
+      ;;
+  esac
   if have aide; then
     aide_setup 2>/dev/null
     if [ -f "$DB_IN" ]; then
@@ -1191,6 +1219,8 @@ OPTIONS
   -y, --yes         assume yes
     --allow-port PORT/PROTO
                     allow a port without prompting (repeatable, e.g. 22/tcp)
+    --auto-apply-updates
+                    opt in to enabling a timer that applies package updates
 -q, --quiet       only warnings/errors (used by timers)
       --path DIR    scan malware: directory to scan (repeatable)
       --bg          aide: run in background via systemd-run

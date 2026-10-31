@@ -162,6 +162,14 @@ sudo shieldctl install --usbguard
 distribution-appropriate automatic-update package. Optional packages may require
 additional distribution repositories.
 
+Automatic update application is opt-in. `install` does not enable a timer that
+can apply package updates; use the explicit flag only after reviewing your
+distribution's update policy:
+
+```bash
+sudo shieldctl install --auto-apply-updates
+```
+
 ## Safe first run
 
 Always inspect the current state and preview changes first:
@@ -397,6 +405,7 @@ until `sudo shieldctl rollback` is run.
 | `-n`, `--dry-run` | Preview changes without writing or applying them |
 | `-y`, `--yes` | Answer safety confirmations positively |
 | `--allow-port PORT/PROTO` | Allow a firewall port without prompting; repeatable, e.g. `22/tcp` |
+| `--auto-apply-updates` | Opt in to enabling the distribution update-application timer during `install` |
 | `-q`, `--quiet` | Suppress normal output; useful for timers |
 | `--path DIR` | Add a malware-scan path; repeatable |
 | `--bg` | Run an AIDE operation through systemd |
