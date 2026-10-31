@@ -175,7 +175,7 @@ test_noninteractive_closed() {
   setup_case remote-noninteractive
   export FAKE_SS_MODE=remote
   export SSH_CONNECTION='1.2.3.4 5555 10.0.0.5 22'
-  if run_tool harden firewall >/dev/null 2>&1 &&
+  if setsid -w "$TOOL" harden firewall </dev/null >/dev/null 2>&1 &&
     has_log 'allow 22/tcp' &&
     not_log 'allow 5353/udp'; then
     pass "$name"
