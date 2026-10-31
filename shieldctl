@@ -23,6 +23,7 @@ ASSUME_YES=0
 QUIET=0
 BG=0
 NO_ACCEPT=0
+CONFIRM_UNAVAILABLE=0
 SCAN_PATHS=()
 ORIG_ARGS="$*"
 TASK_LOG=""
@@ -58,10 +59,36 @@ need_root() {
 
 confirm() {
   [ "$ASSUME_YES" -eq 1 ] && return 0
-  [ -t 0 ] || return 1
-  local a
-  read -r -p "$1 [y/N] " a
-  case "$a" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
+  local a input="/dev/stdin"
+  if [ ! -t 0 ]; then
+    [ -r /dev/tty ] && [ -w /dev/tty ] || {
+      CONFIRM_UNAVAILABLE=1
+      warn "interactive confirmation required; use --yes only after reviewing the requested changes"
+      return 2
+    }
+    input="/dev/tty"
+  fi
+  while :; do
+    if [ "$input" = "/dev/tty" ]; then
+      printf '%s [Y/N] ' "$1" >"$input"
+      if ! IFS= read -r a <"$input"; then
+        CONFIRM_UNAVAILABLE=1
+        warn "could not read an interactive decision; no change was applied"
+        return 2
+      fi
+    else
+      read -r -p "$1 [Y/N] " a <"$input" || {
+        CONFIRM_UNAVAILABLE=1
+        warn "could not read an interactive decision; no change was applied"
+        return 2
+      }
+    fi
+    case "$a" in
+      y | Y | yes | YES) return 0 ;;
+      n | N | no | NO) return 1 ;;
+      *) warn "please enter Y or N" ;;
+    esac
+  done
 }
 
 run() {
@@ -290,7 +317,7 @@ h_umask() {
 
 h_firewall() {
   info "firewall: deny unsolicited incoming traffic and allow outgoing traffic"
-  local listeners spec proto address port allow_specs=() blocked_specs=()
+  local listeners spec proto address port decision_rc allow_specs=() blocked_specs=()
   listeners="$(exposed_listeners)"
   if [ -n "$listeners" ]; then
     warn "Firewall warning: default-deny incoming may block these listeners:"
@@ -306,6 +333,11 @@ h_firewall() {
         blocked_specs+=("$proto|$port")
         warn "Selected: $proto/$port will be blocked"
       else
+        decision_rc=$?
+        if [ "$decision_rc" -eq 2 ] || [ "$CONFIRM_UNAVAILABLE" -eq 1 ]; then
+          warn "Firewall skipped because port decisions could not be collected interactively."
+          return 1
+        fi
         allow_specs+=("$proto|$port")
         info "Selected: $proto/$port will remain allowed"
       fi
@@ -409,7 +441,7 @@ cmd_harden() {
       modules) info "Writes module deny rules for selected obsolete or high-risk kernel modules." ;;
       coredump) info "Disables traditional and systemd core dumps." ;;
       perms) info "Tightens selected permissions only; existing permissions are backed up." ;;
-      firewall) info "Warns about listeners and SSH before applying default-deny incoming rules." ;;
+      firewall) info "Lists every exposed listener and asks whether each port should be blocked or preserved." ;;
       umask) info "Sets the login default umask to 027 for new files." ;;
       usbguard) info "Generates a USB policy and checks for keyboard/mouse lockout risk." ;;
     esac
