@@ -4,6 +4,10 @@
 ![Shell](https://img.shields.io/badge/shell-Bash-4EAA25)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+<p align="center">
+  <img src="docs/demo.gif" alt="ShieldCTL terminal demonstration" width="900">
+</p>
+
 **shieldctl** is a single-file Linux hardening, auditing, integrity-monitoring, and
 scheduling utility. It applies conservative security improvements, explains what it
 finds, records task results, and keeps changes easy to review and undo.
