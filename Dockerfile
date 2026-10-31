@@ -5,10 +5,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN if command -v apt-get >/dev/null 2>&1; then \
       apt-get update && \
-      apt-get install -y --no-install-recommends bash coreutils grep sed findutils util-linux procps shellcheck bats ca-certificates && \
+      apt-get install -y --no-install-recommends bash coreutils grep sed findutils util-linux procps expect shellcheck bats ca-certificates && \
       rm -rf /var/lib/apt/lists/*; \
     elif command -v dnf >/dev/null 2>&1; then \
-      dnf install -y bash coreutils grep sed findutils util-linux util-linux-core util-linux-user procps-ng ShellCheck bats ca-certificates && \
+      dnf install -y bash coreutils grep sed findutils util-linux util-linux-core util-linux-user procps-ng expect ShellCheck bats ca-certificates && \
       dnf clean all; \
     else \
       echo "Unsupported test image: no apt-get or dnf" >&2; exit 1; \
