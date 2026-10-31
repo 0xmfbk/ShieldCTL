@@ -54,6 +54,10 @@ EOF
 #!/usr/bin/env bash
 printf 'firewall-cmd %s\n' "$*" >>"$FAKE_LOG"
 EOF
+  cat >"$CASE_DIR/bin/timeshift" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
   chmod 755 "$CASE_DIR/bin/"*
   export CASE_DIR
   export FAKE_LOG="$CASE_DIR/ufw.log"
@@ -127,13 +131,13 @@ test_interface_scope() {
   for command in bash readlink mkdir chmod awk sort grep cat sed; do
     ln -s "$(command -v "$command")" "$CASE_DIR/bin/$command"
   done
-  export PATH="$CASE_DIR/bin:/usr/local/sbin:/usr/sbin"
+  export PATH="$CASE_DIR/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/bin"
   cat >"$CASE_DIR/run.sh" <<EOF
 #!/usr/bin/env bash
 exec "$TOOL" harden firewall
 EOF
   chmod 755 "$CASE_DIR/run.sh"
-  if ! printf 'Y\n' | /usr/bin/script -qec "$CASE_DIR/run.sh" /dev/null >"$CASE_DIR/pty.out" 2>&1; then
+  if ! printf 'Y\nY\n' | /usr/bin/script -qec "bash '$CASE_DIR/run.sh'" /dev/null >"$CASE_DIR/pty.out" 2>&1; then
     local output
     output="$(cat "$CASE_DIR/pty.out" 2>/dev/null || true)"
     export PATH="$old_path"
