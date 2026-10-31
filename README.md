@@ -191,40 +191,44 @@ Hardening is intentionally verbose. Each module prints:
 - Whether the step completed, was skipped, or failed
 - A final count of requested, completed, and skipped/failed steps
 
-Before enabling a firewall, shieldctl lists every exposed TCP and UDP listener,
-including its address, protocol, and port. It asks whether each listener should
-remain reachable:
+Before enabling a firewall, shieldctl lists exposed TCP and UDP listeners,
+including their address, protocol, port, and interface scope. It keeps listeners
+closed unless they are explicitly approved:
 
 ```text
-Block and close tcp/22? [y/N]
-Block and close udp/546? [y/N]
+Allow incoming tcp/8080 from anywhere? [Y/N]
+Allow incoming udp/51820 on wg0 from anywhere? [Y/N]
 ```
 
-Answer `Y` to block and close that listener, or `N` to preserve it with an
-allow rule. Duplicate addresses for the same protocol/port are reviewed once.
-If a desktop notification session is available, shieldctl also sends a
-firewall-review notification. This applies to SSH, web servers, databases,
-containers, VM bridges, discovery services, and dynamically assigned ports.
+Answer `Y` only when the service should be reachable; `N` (or an invalid
+non-interactive decision) keeps it closed. Duplicate listeners are deduplicated
+by protocol, port, and interface. Interface-scoped listeners use interface
+rules, while DHCP client listeners on link-local or loopback-like interfaces are
+not offered because replies are covered by conntrack.
 
-If you are connected remotely, preserve your SSH listener when prompted. For a
-planned non-interactive run, add the required rules before hardening:
+The server port of the current SSH session is always allowed automatically and
+is never removed or overridden. Other SSH listeners are never opened by
+`--yes` or a non-interactive run. If an SSH daemon listener is not approved,
+the firewall step aborts safely and tells you to use `--allow-port`:
 
 ```bash
-sudo ufw allow OpenSSH
-sudo shieldctl harden
+sudo shieldctl harden firewall --allow-port 22/tcp
 ```
 
-Or, if you have verified every required port and want the command to answer
-prompts automatically:
+Explicit ports can be repeated. They are allowed without prompting:
 
 ```bash
-sudo shieldctl harden --yes
+sudo shieldctl harden firewall \
+  --allow-port 22/tcp \
+  --allow-port 51820/udp
 ```
 
-Review the displayed listeners carefully. A firewall may make other services,
-VM bridges, discovery protocols, or application ports unreachable. `--yes`
-answers every port prompt with `Y`, so use it only after reviewing the
-listeners.
+`--yes` never opens discovered ports; it only applies explicit
+`--allow-port` values and the current SSH-session protection. In dry-run and
+test mode, no prompts occur and the exact firewall commands are printed.
+UFW rules are added before default-deny is enabled. firewalld interface rules
+use rich rules on a best-effort basis. Rollback intentionally leaves the
+firewall enabled.
 
 ## Command reference
 
@@ -383,6 +387,7 @@ until `sudo shieldctl rollback` is run.
 |---|---|
 | `-n`, `--dry-run` | Preview changes without writing or applying them |
 | `-y`, `--yes` | Answer safety confirmations positively |
+| `--allow-port PORT/PROTO` | Allow a firewall port without prompting; repeatable, e.g. `22/tcp` |
 | `-q`, `--quiet` | Suppress normal output; useful for timers |
 | `--path DIR` | Add a malware-scan path; repeatable |
 | `--bg` | Run an AIDE operation through systemd |

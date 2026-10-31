@@ -25,6 +25,7 @@ BG=0
 NO_ACCEPT=0
 CONFIRM_UNAVAILABLE=0
 SCAN_PATHS=()
+ALLOW_PORTS=()
 ORIG_ARGS="$*"
 TASK_LOG=""
 PM=""
@@ -316,77 +317,136 @@ h_umask() {
 }
 
 h_firewall() {
-  info "firewall: deny unsolicited incoming traffic and allow outgoing traffic"
-  local listeners spec proto address port decision_rc allow_specs=() blocked_specs=()
-  listeners="$(exposed_listeners)"
-  if [ -n "$listeners" ]; then
-    warn "Firewall warning: default-deny incoming may block these listeners:"
-    notify_user "Firewall review required: exposed listeners will be allowed or blocked before default-deny."
-    while IFS='|' read -r proto address port; do
-      [ -n "$port" ] || continue
-      warn "  - $proto port $port on $address"
-      if [ "$DRY_RUN" -eq 1 ]; then
-        info "dry-run: would ask whether to preserve $proto/$port"
-        continue
-      fi
-      if confirm "Block and close $proto/$port?"; then
-        blocked_specs+=("$proto|$port")
-        warn "Selected: $proto/$port will be blocked"
-      else
-        decision_rc=$?
-        if [ "$decision_rc" -eq 2 ] || [ "$CONFIRM_UNAVAILABLE" -eq 1 ]; then
-          warn "Firewall skipped because port decisions could not be collected interactively."
-          return 1
-        fi
-        allow_specs+=("$proto|$port")
-        info "Selected: $proto/$port will remain allowed"
-      fi
-    done <<<"$(exposed_listener_specs)"
-  fi
-  if [ "$LIVE" -eq 0 ]; then info "(skipped in test mode)"; return 0; fi
-  if have ufw; then
-    for spec in "${allow_specs[@]}"; do
-      IFS='|' read -r proto port <<<"$spec"
-      run ufw allow "$port/$proto"
-      info "Allowed $proto/$port before default-deny rules"
-    done
-    for spec in "${blocked_specs[@]}"; do
-      IFS='|' read -r proto port <<<"$spec"
-      run ufw insert 1 deny "$port/$proto"
-      info "Blocked $proto/$port before default-deny rules"
-    done
-    run ufw default deny incoming
-    run ufw default allow outgoing
-    run ufw logging on
-    run ufw --force enable
-    if [ -d /sys/class/net/virbr0 ]; then
-      info "libvirt bridge detected: allowing traffic on virbr0 (VM DHCP/DNS)"
-      run ufw allow in on virbr0
-    fi
-    info "Firewall result (UFW):"
-    if [ "$DRY_RUN" -eq 0 ]; then
-      ufw status verbose | sed 's/^/  /'
-    else
-      info "dry-run: UFW would deny incoming, allow outgoing, and enable logging"
-    fi
-  elif have firewall-cmd; then
-    for spec in "${allow_specs[@]}"; do
-      IFS='|' read -r proto port <<<"$spec"
-      run firewall-cmd --permanent --add-port="$port/$proto"
-      info "Allowed $proto/$port before firewalld activation"
-    done
-    run systemctl enable --now firewalld
-    run firewall-cmd --reload
-    info "Firewall result (firewalld):"
-    if [ "$DRY_RUN" -eq 0 ]; then
-      firewall-cmd --state | sed 's/^/  /'
-      firewall-cmd --list-all | sed 's/^/  /'
-    else
-      info "dry-run: firewalld would be enabled and reloaded"
-    fi
+  local backend="" listeners spec proto address port iface key ssh_port
+  local decision_rc sshd_ports sshd_uncovered=0
+  local allow_specs=() seen_allow=() listener_key
+  if have ufw; then backend=ufw
+  elif have firewall-cmd; then backend=firewalld
   else
     warn "no ufw/firewalld found. Install one: sudo $PROG install --firewall"
     return 1
+  fi
+  info "firewall: default-deny incoming and allow outgoing ($backend)"
+  listeners="$(exposed_listener_specs)"
+  notify_user "Firewall review required: only explicitly allowed listeners will remain reachable."
+
+  add_allow() {
+    local allow_proto="$1" allow_port="$2" allow_iface="${3:-}" allow_key
+    allow_key="$allow_proto|$allow_port|$allow_iface"
+    for key in "${seen_allow[@]}"; do [ "$key" = "$allow_key" ] && return 0; done
+    seen_allow+=("$allow_key")
+    allow_specs+=("$allow_key")
+  }
+
+  for spec in "${ALLOW_PORTS[@]}"; do
+    port="${spec%%/*}"; proto="${spec##*/}"
+    add_allow "$proto" "$port"
+    info "Requested allow: $proto/$port from anywhere"
+  done
+  ssh_port=""
+  if [ -n "${SSH_CONNECTION:-}" ]; then
+    read -r _ _ _ ssh_port <<<"$SSH_CONNECTION"
+  elif [ -n "${SSH_CLIENT:-}" ]; then
+    read -r _ _ ssh_port <<<"$SSH_CLIENT"
+  fi
+  if [[ "$ssh_port" =~ ^[0-9]+$ ]] && [ "$ssh_port" -ge 1 ] && [ "$ssh_port" -le 65535 ]; then
+    add_allow tcp "$ssh_port"
+    warn "Current SSH session detected: automatically allowing tcp/$ssh_port"
+  fi
+
+  sshd_ports="$(ss -H -tlnp 2>/dev/null | awk '$0 ~ /sshd/ {
+    endpoint=$5; sub(/^.*:/, "", endpoint); if (endpoint ~ /^[0-9]+$/) print endpoint
+  }' | sort -nu)"
+  if printf '%s\n' "$listeners" | awk -F'|' '$1 == "tcp" && $3 == "22" { found=1 } END { exit !found }'; then
+    sshd_ports="$(printf '%s\n22\n' "$sshd_ports" | sort -nu)"
+  fi
+  while IFS= read -r ssh_port; do
+    [ -n "$ssh_port" ] || continue
+    sshd_uncovered=1
+    for key in "${seen_allow[@]}"; do
+      IFS='|' read -r proto port iface <<<"$key"
+      if [ "$proto" = tcp ] && [ "$port" = "$ssh_port" ]; then sshd_uncovered=0; break; fi
+    done
+    if [ "$sshd_uncovered" -eq 1 ] && { [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; }; then
+      warn "SSH daemon listens on tcp/$ssh_port but it is not approved."
+      warn "Aborting firewall step safely; pass --allow-port $ssh_port/tcp to approve it."
+      return 1
+    fi
+  done <<<"$sshd_ports"
+
+  if [ -n "$listeners" ]; then
+    warn "Firewall review: listeners not explicitly allowed will remain closed:"
+    while IFS='|' read -r proto address port iface; do
+      [ -n "$port" ] || continue
+      if [ -n "$iface" ] && { [ "$proto" = udp ] && { [ "$port" = 68 ] || [ "$port" = 546 ]; }; }; then
+        info "Ignoring interface-scoped DHCP client listener: $proto/$port on $iface"
+        continue
+      fi
+      listener_key="$proto|$port|$iface"
+      if printf '%s\n' "${seen_allow[@]}" | grep -qxF "$proto|$port|" ||
+        printf '%s\n' "${seen_allow[@]}" | grep -qxF "$listener_key"; then
+        info "Allowed: $proto/$port${iface:+ on $iface}"
+        continue
+      fi
+      warn "  - $proto port $port on $address${iface:+ (interface $iface)}"
+      if [ "$DRY_RUN" -eq 1 ] || [ "$LIVE" -eq 0 ]; then
+        info "dry-run: would ask whether to allow incoming $proto/$port${iface:+ on $iface}"
+        continue
+      fi
+      if [ "$ASSUME_YES" -eq 1 ]; then
+        info "not approved by --yes: $proto/$port${iface:+ on $iface} will remain closed"
+        continue
+      fi
+      if confirm "Allow incoming $proto/$port${iface:+ on $iface} from anywhere?"; then
+        add_allow "$proto" "$port" "$iface"
+        info "Selected: $proto/$port${iface:+ on $iface} will be allowed"
+      else
+        decision_rc=$?
+        if [ "$decision_rc" -eq 2 ] || [ "$CONFIRM_UNAVAILABLE" -eq 1 ]; then
+          warn "No decision received; keeping $proto/$port closed."
+        else
+          info "Selected: $proto/$port${iface:+ on $iface} will remain closed"
+        fi
+      fi
+    done <<<"$listeners"
+  fi
+  fw_run() {
+    if [ "$DRY_RUN" -eq 1 ] || [ "$LIVE" -eq 0 ]; then
+      printf '%s[dry-run]%s' "$C_Y" "$C_N"
+      printf ' %q' "$@"
+      printf '\n'
+      return 0
+    fi
+    "$@"
+  }
+  for spec in "${allow_specs[@]}"; do
+    IFS='|' read -r proto port iface <<<"$spec"
+    if [ "$backend" = ufw ]; then
+      if [ -n "$iface" ]; then fw_run ufw allow in on "$iface" to any port "$port" proto "$proto"
+      else fw_run ufw allow "$port/$proto"; fi
+    elif [ -n "$iface" ]; then
+      fw_run firewall-cmd --permanent --add-rich-rule="rule interface name=\"$iface\" port port=\"$port\" protocol=\"$proto\" accept"
+    else
+      fw_run firewall-cmd --permanent --add-port="$port/$proto"
+    fi
+    info "Allowed $proto/$port${iface:+ on $iface} before firewall activation"
+  done
+  if [ "$backend" = ufw ]; then
+    fw_run ufw default deny incoming
+    fw_run ufw default allow outgoing
+    fw_run ufw logging on
+    fw_run ufw --force enable
+    info "Firewall result (UFW):"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ]; then ufw status verbose | sed 's/^/  /'
+    else info "dry-run: ufw status verbose"; fi
+  else
+    fw_run systemctl enable --now firewalld
+    fw_run firewall-cmd --reload
+    info "Firewall result (firewalld):"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$LIVE" -eq 1 ]; then
+      firewall-cmd --state | sed 's/^/  /'
+      firewall-cmd --list-all | sed 's/^/  /'
+    else info "dry-run: firewall-cmd --state; firewall-cmd --list-all"; fi
   fi
 }
 
@@ -441,7 +501,7 @@ cmd_harden() {
       modules) info "Writes module deny rules for selected obsolete or high-risk kernel modules." ;;
       coredump) info "Disables traditional and systemd core dumps." ;;
       perms) info "Tightens selected permissions only; existing permissions are backed up." ;;
-      firewall) info "Lists every exposed listener and asks whether each port should be blocked or preserved." ;;
+      firewall) info "Keeps incoming traffic closed unless the current SSH session, --allow-port, or an explicit approval allows it." ;;
       umask) info "Sets the login default umask to 027 for new files." ;;
       usbguard) info "Generates a USB policy and checks for keyboard/mouse lockout risk." ;;
     esac
@@ -714,17 +774,21 @@ cmd_aide() {
 # --------------------------------------------------------------------- scans
 exposed_listeners() {
   have ss || return 0
-  ss -H -tuln 2>/dev/null | awk '{print $5}' | grep -vE '^(127\.|\[::1\]|::1|localhost)' | sort -u
+  ss -H -tuln 2>/dev/null | awk '{print $5}' |
+    grep -vE '^(127\.|\[::1\]|::1|localhost)' | sort -u
 }
 
 exposed_listener_specs() {
   have ss || return 0
   ss -H -tuln 2>/dev/null |
     awk '$5 !~ /^(127\.|\[::1\]|::1|localhost)/ {
-      endpoint=$5
-      sub(/^.*:/, "", endpoint)
-      key=$1 "|" endpoint
-      if (!seen[key]++) print $1 "|" $5 "|" endpoint
+      endpoint=$5; port=endpoint; sub(/^.*:/, "", port)
+      host=endpoint; sub(/:[^:]*$/, "", host)
+      gsub(/^\[/, "", host); gsub(/\]$/, "", host)
+      iface=""
+      if (host ~ /%/) { iface=host; sub(/^.*%/, "", iface) }
+      key=$1 "|" port "|" iface
+      if (!seen[key]++) print $1 "|" $5 "|" port "|" iface
     }' | sort -t'|' -k1,1 -k3,3 -k2,2
 }
 
@@ -1105,7 +1169,9 @@ USAGE: $PROG <command> [options]
 OPTIONS
   -n, --dry-run     show what would change, change nothing
   -y, --yes         assume yes
-  -q, --quiet       only warnings/errors (used by timers)
+    --allow-port PORT/PROTO
+                    allow a port without prompting (repeatable, e.g. 22/tcp)
+-q, --quiet       only warnings/errors (used by timers)
       --path DIR    scan malware: directory to scan (repeatable)
       --bg          aide: run in background via systemd-run
 EOF
@@ -1118,6 +1184,13 @@ main() {
     case "$1" in
       -n | --dry-run) DRY_RUN=1 ;;
       -y | --yes) ASSUME_YES=1 ;;
+      --allow-port)
+        shift
+        [[ "${1:-}" =~ ^([0-9]{1,5})/(tcp|udp)$ ]] ||
+          die "--allow-port must be PORT/tcp or PORT/udp"
+        [ "${BASH_REMATCH[1]}" -ge 1 ] && [ "${BASH_REMATCH[1]}" -le 65535 ] ||
+          die "--allow-port port must be between 1 and 65535"
+        ALLOW_PORTS+=("$1") ;;
       -q | --quiet) QUIET=1 ;;
       --bg) BG=1 ;;
       --no-accept) NO_ACCEPT=1 ;;
